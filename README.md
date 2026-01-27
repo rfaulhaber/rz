@@ -1,3 +1,3 @@
-# nix-rust-template
+# rz
 
-My personal project template for Rust projects using Nix.
+A generic compression/decompression tool written in Rust.

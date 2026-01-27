@@ -15,7 +15,7 @@
     flake-parts,
     ...
   }: let
-    projectName = "CHANGEME";
+    projectName = "rz";
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       imports = [];
@@ -40,6 +40,10 @@
           overlays = [
             self.overlays.rustOverlay
           ];
+          config.allowUnfreePredicate = pkg:
+            builtins.elem (pkgs.lib.getName pkg) [
+              "claude-code"
+            ];
         };
 
         formatter = pkgs.alejandra;
@@ -60,6 +64,7 @@
             clippy
             rust-analyzer
             cargo-nextest
+            claude-code
           ];
         };
       };
