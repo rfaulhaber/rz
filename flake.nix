@@ -40,10 +40,6 @@
           overlays = [
             self.overlays.rustOverlay
           ];
-          config.allowUnfreePredicate = pkg:
-            builtins.elem (pkgs.lib.getName pkg) [
-              "claude-code"
-            ];
         };
 
         formatter = pkgs.alejandra;
@@ -61,10 +57,8 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             rust-bin.stable.latest.default
-            clippy
             rust-analyzer
             cargo-nextest
-            claude-code
           ];
         };
       };
