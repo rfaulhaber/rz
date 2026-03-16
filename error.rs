@@ -20,4 +20,7 @@ pub enum Error {
 
     #[error("path is not valid UTF-8: {0}")]
     InvalidUtf8Path(String),
+
+    #[error("7z: {0}")]
+    SevenZ(#[from] sevenz_rust2::Error),
 }

@@ -6,6 +6,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 use crate::error::{Error, Result};
+use crate::{ArchiveInfo, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
@@ -52,14 +53,6 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, force: bool) -> Result<()
 
 // ── List ──────────────────────────────────────────────────────────────────────
 
-pub struct Entry {
-    pub path: Utf8PathBuf,
-    pub size: u64,
-    pub mtime: u64,
-    pub mode: u32,
-    pub is_dir: bool,
-}
-
 pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
@@ -86,14 +79,7 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
 
 // ── Info ──────────────────────────────────────────────────────────────────────
 
-pub struct Info {
-    pub format: &'static str,
-    pub entry_count: usize,
-    pub total_uncompressed: u64,
-    pub compressed_size: u64,
-}
-
-pub fn info(input: &Utf8Path) -> Result<Info> {
+pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
     let compressed_size = fs_err::metadata(input)?.len();
 
     let file = fs_err::File::open(input)?;
@@ -109,7 +95,7 @@ pub fn info(input: &Utf8Path) -> Result<Info> {
         entry_count += 1;
     }
 
-    Ok(Info {
+    Ok(ArchiveInfo {
         format: "tar.gz",
         entry_count,
         total_uncompressed,

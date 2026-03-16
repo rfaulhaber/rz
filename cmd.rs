@@ -87,4 +87,5 @@ pub enum Format {
     TarZst, // tar + zstd
     TarXz,  // tar + xz
     TarBz2, // tar + bzip2
+    SevenZ, // 7z
 }

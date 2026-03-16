@@ -6,7 +6,7 @@ use clap::Parser;
 use rz::cmd::{Cli, Command, Format};
 use rz::error::{Error, Result};
 use rz::format::{resolve_compress_format, resolve_input_format};
-use rz::tar_gz;
+use rz::{seven_z, tar_gz};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -37,6 +37,7 @@ fn run(cli: Cli) -> Result<()> {
             };
             match fmt {
                 Format::TarGz => tar_gz::compress(&input, &output, level)?,
+                Format::SevenZ => seven_z::compress(&input, &output, level)?,
                 other => return Err(Error::UnsupportedFormat(
                     format!("{:?}", other),
                 )),
@@ -53,6 +54,7 @@ fn run(cli: Cli) -> Result<()> {
             let output = output.unwrap_or_else(|| ".".into());
             match fmt {
                 Format::TarGz => tar_gz::decompress(&input, &output, force)?,
+                Format::SevenZ => seven_z::decompress(&input, &output, force)?,
                 other => return Err(Error::UnsupportedFormat(
                     format!("{:?}", other),
                 )),
@@ -67,6 +69,7 @@ fn run(cli: Cli) -> Result<()> {
             let fmt = resolve_input_format(format, &input)?;
             let entries = match fmt {
                 Format::TarGz => tar_gz::list(&input)?,
+                Format::SevenZ => seven_z::list(&input)?,
                 other => return Err(Error::UnsupportedFormat(
                     format!("{:?}", other),
                 )),
@@ -91,6 +94,7 @@ fn run(cli: Cli) -> Result<()> {
             let fmt = resolve_input_format(format, &input)?;
             let info = match fmt {
                 Format::TarGz => tar_gz::info(&input)?,
+                Format::SevenZ => seven_z::info(&input)?,
                 other => return Err(Error::UnsupportedFormat(
                     format!("{:?}", other),
                 )),

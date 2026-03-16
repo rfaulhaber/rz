@@ -25,6 +25,8 @@ impl Format {
             Some(Self::Tar)
         } else if s.ends_with(".zip") {
             Some(Self::Zip)
+        } else if s.ends_with(".7z") {
+            Some(Self::SevenZ)
         } else {
             None
         }
@@ -39,6 +41,7 @@ impl Format {
             "application/x-xz" => Some(Self::TarXz),
             "application/x-bzip2" => Some(Self::TarBz2),
             "application/zip" => Some(Self::Zip),
+            "application/x-7z-compressed" => Some(Self::SevenZ),
             _ => None,
         }
     }
@@ -52,6 +55,7 @@ impl Format {
             Self::TarZst => ".tar.zst",
             Self::TarXz => ".tar.xz",
             Self::TarBz2 => ".tar.bz2",
+            Self::SevenZ => ".7z",
         }
     }
 
