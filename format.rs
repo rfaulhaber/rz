@@ -102,3 +102,171 @@ pub fn resolve_input_format(
     Format::from_path(input)
         .ok_or_else(|| Error::CannotInferFormat(input.to_owned()))
 }
+
+#[cfg(test)]
+mod tests {
+    use camino::{Utf8Path, Utf8PathBuf};
+
+    use crate::cmd::Format;
+    use crate::format::{resolve_compress_format, resolve_input_format};
+
+    // ── from_path ────────────────────────────────────────────────────────
+
+    #[test]
+    fn from_path_tar_gz() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tar.gz")), Some(Format::TarGz));
+    }
+
+    #[test]
+    fn from_path_tgz() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tgz")), Some(Format::TarGz));
+    }
+
+    #[test]
+    fn from_path_tar_zst() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tar.zst")), Some(Format::TarZst));
+    }
+
+    #[test]
+    fn from_path_tzst() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tzst")), Some(Format::TarZst));
+    }
+
+    #[test]
+    fn from_path_tar_xz() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tar.xz")), Some(Format::TarXz));
+    }
+
+    #[test]
+    fn from_path_txz() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.txz")), Some(Format::TarXz));
+    }
+
+    #[test]
+    fn from_path_tar_bz2() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tar.bz2")), Some(Format::TarBz2));
+    }
+
+    #[test]
+    fn from_path_tbz2() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tbz2")), Some(Format::TarBz2));
+    }
+
+    #[test]
+    fn from_path_tar() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.tar")), Some(Format::Tar));
+    }
+
+    #[test]
+    fn from_path_zip() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.zip")), Some(Format::Zip));
+    }
+
+    #[test]
+    fn from_path_seven_z() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.7z")), Some(Format::SevenZ));
+    }
+
+    #[test]
+    fn from_path_unknown_returns_none() {
+        assert_eq!(Format::from_path(Utf8Path::new("a.rar")), None);
+    }
+
+    #[test]
+    fn from_path_no_extension_returns_none() {
+        assert_eq!(Format::from_path(Utf8Path::new("noext")), None);
+    }
+
+    #[test]
+    fn from_path_is_case_insensitive() {
+        assert_eq!(Format::from_path(Utf8Path::new("A.TAR.GZ")), Some(Format::TarGz));
+        assert_eq!(Format::from_path(Utf8Path::new("B.Tar.Bz2")), Some(Format::TarBz2));
+        assert_eq!(Format::from_path(Utf8Path::new("C.ZIP")), Some(Format::Zip));
+    }
+
+    #[test]
+    fn from_path_with_directory_prefix() {
+        assert_eq!(
+            Format::from_path(Utf8Path::new("/some/dir/archive.tar.gz")),
+            Some(Format::TarGz),
+        );
+    }
+
+    // ── extension ────────────────────────────────────────────────────────
+
+    #[test]
+    fn extension_round_trips_with_from_path() {
+        let formats = [
+            Format::Zip,
+            Format::Tar,
+            Format::TarGz,
+            Format::TarZst,
+            Format::TarXz,
+            Format::TarBz2,
+            Format::SevenZ,
+        ];
+        for fmt in &formats {
+            let name = format!("test{}", fmt.extension());
+            let detected = Format::from_path(Utf8Path::new(&name));
+            assert_eq!(detected.as_ref(), Some(fmt), "round-trip failed for {}", fmt.extension());
+        }
+    }
+
+    // ── default_output ───────────────────────────────────────────────────
+
+    #[test]
+    fn default_output_appends_extension() {
+        let out = Format::TarGz.default_output(Utf8Path::new("mydir"));
+        assert_eq!(out, Utf8PathBuf::from("mydir.tar.gz"));
+    }
+
+    #[test]
+    fn default_output_strips_parent_directory() {
+        let out = Format::Zip.default_output(Utf8Path::new("/home/user/mydir"));
+        assert_eq!(out, Utf8PathBuf::from("mydir.zip"));
+    }
+
+    // ── resolve_compress_format ──────────────────────────────────────────
+
+    #[test]
+    fn resolve_compress_explicit_flag_wins() {
+        let result = resolve_compress_format(Some(Format::TarGz), Some(Utf8Path::new("out.zip")));
+        assert_eq!(result.ok(), Some(Format::TarGz));
+    }
+
+    #[test]
+    fn resolve_compress_infers_from_output_extension() {
+        let result = resolve_compress_format(None, Some(Utf8Path::new("out.tar.zst")));
+        assert_eq!(result.ok(), Some(Format::TarZst));
+    }
+
+    #[test]
+    fn resolve_compress_unknown_output_extension_errors() {
+        assert!(resolve_compress_format(None, Some(Utf8Path::new("out.rar"))).is_err());
+    }
+
+    #[test]
+    fn resolve_compress_no_format_no_output_errors() {
+        assert!(resolve_compress_format(None, None).is_err());
+    }
+
+    // ── resolve_input_format ─────────────────────────────────────────────
+
+    #[test]
+    fn resolve_input_explicit_flag_wins() {
+        let result = resolve_input_format(Some(Format::SevenZ), Utf8Path::new("a.tar.gz"));
+        assert_eq!(result.ok(), Some(Format::SevenZ));
+    }
+
+    #[test]
+    fn resolve_input_falls_back_to_extension() {
+        // File doesn't exist → magic-byte detection returns None → falls to extension
+        let result = resolve_input_format(None, Utf8Path::new("nonexistent.tar.bz2"));
+        assert_eq!(result.ok(), Some(Format::TarBz2));
+    }
+
+    #[test]
+    fn resolve_input_unknown_extension_errors() {
+        assert!(resolve_input_format(None, Utf8Path::new("nonexistent.rar")).is_err());
+    }
+}
