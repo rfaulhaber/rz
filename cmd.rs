@@ -36,6 +36,10 @@ pub enum Command {
         /// Number of threads (0 = all cores)
         #[arg(short, long, default_value_t = 0)]
         threads: usize,
+
+        /// Exclude files matching a glob pattern (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
     },
 
     /// Decompress an archive
@@ -55,6 +59,14 @@ pub enum Command {
         /// Overwrite existing files
         #[arg(short = 'F', long)]
         force: bool,
+
+        /// Strip N leading path components during extraction
+        #[arg(long, default_value_t = 0)]
+        strip_components: u32,
+
+        /// Exclude entries matching a glob pattern (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
     },
 
     /// List archive contents
@@ -68,6 +80,10 @@ pub enum Command {
         /// Show detailed info (size, date, permissions)
         #[arg(short, long)]
         long: bool,
+
+        /// Exclude entries matching a glob pattern (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
     },
 
     /// Show archive metadata

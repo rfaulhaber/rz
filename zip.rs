@@ -1,31 +1,36 @@
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use globset::GlobSet;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::{Error, Result};
-use crate::{ArchiveInfo, Entry};
+use crate::filter;
+use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    level: Option<u32>,
+    opts: &CompressOpts,
 ) -> Result<()> {
     let file = fs_err::File::create(output)?;
     let mut zip = ZipWriter::new(file);
 
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
-        .compression_level(level.map(i64::from));
+        .compression_level(opts.level.map(i64::from));
 
     for input in inputs {
         let meta = fs_err::symlink_metadata(input)?;
         let name = input.file_name().unwrap_or(input.as_str());
+        if opts.excludes.is_match(name) {
+            continue;
+        }
         if meta.is_dir() {
-            add_dir_recursive(&mut zip, input, name, options)?;
+            add_dir_recursive(&mut zip, input, name, options, &opts.excludes)?;
         } else {
             zip.start_file(name, options)?;
             let data = fs_err::read(input)?;
@@ -44,6 +49,7 @@ fn add_dir_recursive(
     dir: &Utf8Path,
     prefix: &str,
     options: SimpleFileOptions,
+    excludes: &GlobSet,
 ) -> Result<()> {
     zip.add_directory(format!("{prefix}/"), options)?;
 
@@ -64,8 +70,12 @@ fn add_dir_recursive(
         let child = Utf8Path::new(entry_str);
         let name = format!("{prefix}/{file_name}");
 
+        if excludes.is_match(&name) {
+            continue;
+        }
+
         if entry.file_type()?.is_dir() {
-            add_dir_recursive(zip, child, &name, options)?;
+            add_dir_recursive(zip, child, &name, options, excludes)?;
         } else {
             zip.start_file(&name, options)?;
             let data = fs_err::read(child)?;
@@ -77,20 +87,35 @@ fn add_dir_recursive(
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, _force: bool) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let mut archive = ZipArchive::new(file)?;
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let name = Utf8PathBuf::from(entry.name());
-        let out_path = output.join(&name);
+
+        // Exclude check against the original (pre-strip) path.
+        let check_path = name.as_str().trim_end_matches('/');
+        if opts.excludes.is_match(check_path) {
+            continue;
+        }
+
+        let stripped = match filter::strip_components(&name, opts.strip_components) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let out_path = output.join(&stripped);
 
         if entry.is_dir() {
             fs_err::create_dir_all(&out_path)?;
         } else {
             if let Some(parent) = out_path.parent() {
                 fs_err::create_dir_all(parent)?;
+            }
+            if !opts.force && fs_err::symlink_metadata(&out_path).is_ok() {
+                return Err(Error::FileExists(out_path));
             }
             let mut out_file = fs_err::File::create(&out_path)?;
             io::copy(&mut entry, &mut out_file)?;

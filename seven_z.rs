@@ -1,18 +1,19 @@
 use camino::{Utf8Path, Utf8PathBuf};
 
-use crate::error::Result;
-use crate::{ArchiveInfo, Entry};
+use crate::error::{Error, Result};
+use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    _level: Option<u32>,
+    opts: &CompressOpts,
 ) -> Result<()> {
     let mut writer = sevenz_rust2::ArchiveWriter::create(output)?;
     for input in inputs {
-        writer.push_source_path(input, |_| true)?;
+        let excludes = &opts.excludes;
+        writer.push_source_path(input, |name| !excludes.is_match(name))?;
     }
     let file = writer.finish()?;
     file.sync_all()?;
@@ -21,8 +22,20 @@ pub fn compress(
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, _force: bool) -> Result<()> {
-    sevenz_rust2::decompress_file(input, output)?;
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
+    if opts.strip_components > 0 {
+        return Err(Error::StripComponentsUnsupported("7z".to_owned()));
+    }
+    if opts.excludes.is_empty() {
+        sevenz_rust2::decompress_file(input, output)?;
+    } else {
+        sevenz_rust2::decompress_file_with_extract_fn(input, output, |entry, reader, dest| {
+            if opts.excludes.is_match(&entry.name) {
+                return Ok(true);
+            }
+            sevenz_rust2::default_entry_extract_fn(entry, reader, dest)
+        })?;
+    }
     Ok(())
 }
 

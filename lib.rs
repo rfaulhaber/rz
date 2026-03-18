@@ -1,7 +1,9 @@
 use camino::Utf8PathBuf;
+use globset::GlobSet;
 
 pub mod cmd;
 pub mod error;
+pub mod filter;
 pub mod format;
 pub mod seven_z;
 pub mod tar;
@@ -27,4 +29,17 @@ pub struct ArchiveInfo {
     pub entry_count: usize,
     pub total_uncompressed: u64,
     pub compressed_size: u64,
+}
+
+/// Options for compress operations.
+pub struct CompressOpts {
+    pub level: Option<u32>,
+    pub excludes: GlobSet,
+}
+
+/// Options for decompress operations.
+pub struct DecompressOpts {
+    pub force: bool,
+    pub strip_components: u32,
+    pub excludes: GlobSet,
 }

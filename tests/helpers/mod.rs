@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use globset::GlobSet;
+
+use rz::{CompressOpts, DecompressOpts};
 
 /// Convenience alias — every integration test returns this.
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -16,8 +19,8 @@ pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// standardised round-trip / list / info tests without duplicating the
 /// boilerplate.
 pub struct FormatHarness {
-    pub compress: fn(&[Utf8PathBuf], &Utf8Path, Option<u32>) -> rz::error::Result<()>,
-    pub decompress: fn(&Utf8Path, &Utf8Path, bool) -> rz::error::Result<()>,
+    pub compress: fn(&[Utf8PathBuf], &Utf8Path, &CompressOpts) -> rz::error::Result<()>,
+    pub decompress: fn(&Utf8Path, &Utf8Path, &DecompressOpts) -> rz::error::Result<()>,
     pub list: fn(&Utf8Path) -> rz::error::Result<Vec<rz::Entry>>,
     pub info: fn(&Utf8Path) -> rz::error::Result<rz::ArchiveInfo>,
     pub ext: &'static str,
@@ -100,6 +103,23 @@ pub const SEVEN_Z: FormatHarness = FormatHarness {
     preserves_top_dir: false,
 };
 
+/// Build default compress opts (no excludes).
+pub fn default_compress_opts(level: Option<u32>) -> CompressOpts {
+    CompressOpts {
+        level,
+        excludes: GlobSet::empty(),
+    }
+}
+
+/// Build default decompress opts (no strip, no excludes, no overwrite).
+pub fn default_decompress_opts() -> DecompressOpts {
+    DecompressOpts {
+        force: false,
+        strip_components: 0,
+        excludes: GlobSet::empty(),
+    }
+}
+
 impl FormatHarness {
     /// Compress a directory tree, decompress it, and verify the contents match.
     pub fn round_trip_directory(&self, level: Option<u32>) -> TestResult {
@@ -109,13 +129,13 @@ impl FormatHarness {
         build_file_tree(&tree)?;
 
         let archive = tmp.join(format!("archive{}", self.ext));
-        (self.compress)(std::slice::from_ref(&tree), &archive, level)?;
+        (self.compress)(std::slice::from_ref(&tree), &archive, &default_compress_opts(level))?;
 
         let out = tmp.join("out");
         if self.preserves_top_dir {
             fs_err::create_dir(&out)?;
         }
-        (self.decompress)(&archive, &out, false)?;
+        (self.decompress)(&archive, &out, &default_decompress_opts())?;
 
         let extracted = if self.preserves_top_dir {
             out.join("tree")
@@ -134,13 +154,13 @@ impl FormatHarness {
         fs_err::write(&file, b"single file content\n")?;
 
         let archive = tmp.join(format!("archive{}", self.ext));
-        (self.compress)(&[file], &archive, None)?;
+        (self.compress)(&[file], &archive, &default_compress_opts(None))?;
 
         let out = tmp.join("out");
         if self.preserves_top_dir {
             fs_err::create_dir(&out)?;
         }
-        (self.decompress)(&archive, &out, false)?;
+        (self.decompress)(&archive, &out, &default_decompress_opts())?;
 
         let extracted = fs_err::read_to_string(out.join("single.txt"))?;
         assert_eq!(extracted, "single file content\n");
@@ -156,7 +176,7 @@ impl FormatHarness {
         build_file_tree(&tree)?;
 
         let archive = tmp.join(format!("archive{}", self.ext));
-        (self.compress)(&[tree], &archive, None)?;
+        (self.compress)(&[tree], &archive, &default_compress_opts(None))?;
 
         let entries = (self.list)(&archive)?;
         let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
@@ -188,7 +208,7 @@ impl FormatHarness {
         build_file_tree(&tree)?;
 
         let archive = tmp.join(format!("archive{}", self.ext));
-        (self.compress)(&[tree], &archive, None)?;
+        (self.compress)(&[tree], &archive, &default_compress_opts(None))?;
 
         let info = (self.info)(&archive)?;
 

@@ -5,8 +5,9 @@ use clap::Parser;
 
 use rz::cmd::{Cli, Command, Format};
 use rz::error::{Error, Result};
+use rz::filter;
 use rz::format::{resolve_compress_format, resolve_input_format};
-use rz::{seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
+use rz::{seven_z, tar, tar_gz, tar_xz, tar_zst, zip, CompressOpts, DecompressOpts};
 #[cfg(feature = "bzip2")]
 use rz::tar_bz2;
 
@@ -28,6 +29,7 @@ fn run(cli: Cli) -> Result<()> {
             format,
             level,
             threads: _,
+            exclude,
         } => {
             let fmt = resolve_compress_format(
                 format,
@@ -37,15 +39,19 @@ fn run(cli: Cli) -> Result<()> {
                 Some(o) => o,
                 None => fmt.default_output(&input[0]),
             };
+            let opts = CompressOpts {
+                level,
+                excludes: filter::build_exclude_set(&exclude)?,
+            };
             match fmt {
-                Format::Zip => zip::compress(&input, &output, level)?,
-                Format::Tar => tar::compress(&input, &output, level)?,
-                Format::TarGz => tar_gz::compress(&input, &output, level)?,
-                Format::TarZst => tar_zst::compress(&input, &output, level)?,
-                Format::TarXz => tar_xz::compress(&input, &output, level)?,
+                Format::Zip => zip::compress(&input, &output, &opts)?,
+                Format::Tar => tar::compress(&input, &output, &opts)?,
+                Format::TarGz => tar_gz::compress(&input, &output, &opts)?,
+                Format::TarZst => tar_zst::compress(&input, &output, &opts)?,
+                Format::TarXz => tar_xz::compress(&input, &output, &opts)?,
                 #[cfg(feature = "bzip2")]
-                Format::TarBz2 => tar_bz2::compress(&input, &output, level)?,
-                Format::SevenZ => seven_z::compress(&input, &output, level)?,
+                Format::TarBz2 => tar_bz2::compress(&input, &output, &opts)?,
+                Format::SevenZ => seven_z::compress(&input, &output, &opts)?,
                 #[allow(unreachable_patterns)]
                 other => return Err(Error::UnsupportedFormat(
                     format!("{:?}", other),
@@ -58,18 +64,25 @@ fn run(cli: Cli) -> Result<()> {
             output,
             format,
             force,
+            strip_components,
+            exclude,
         } => {
             let fmt = resolve_input_format(format, &input)?;
             let output = output.unwrap_or_else(|| ".".into());
+            let opts = DecompressOpts {
+                force,
+                strip_components,
+                excludes: filter::build_exclude_set(&exclude)?,
+            };
             match fmt {
-                Format::Zip => zip::decompress(&input, &output, force)?,
-                Format::Tar => tar::decompress(&input, &output, force)?,
-                Format::TarGz => tar_gz::decompress(&input, &output, force)?,
-                Format::TarZst => tar_zst::decompress(&input, &output, force)?,
-                Format::TarXz => tar_xz::decompress(&input, &output, force)?,
+                Format::Zip => zip::decompress(&input, &output, &opts)?,
+                Format::Tar => tar::decompress(&input, &output, &opts)?,
+                Format::TarGz => tar_gz::decompress(&input, &output, &opts)?,
+                Format::TarZst => tar_zst::decompress(&input, &output, &opts)?,
+                Format::TarXz => tar_xz::decompress(&input, &output, &opts)?,
                 #[cfg(feature = "bzip2")]
-                Format::TarBz2 => tar_bz2::decompress(&input, &output, force)?,
-                Format::SevenZ => seven_z::decompress(&input, &output, force)?,
+                Format::TarBz2 => tar_bz2::decompress(&input, &output, &opts)?,
+                Format::SevenZ => seven_z::decompress(&input, &output, &opts)?,
                 #[allow(unreachable_patterns)]
                 other => return Err(Error::UnsupportedFormat(
                     format!("{:?}", other),
@@ -81,6 +94,7 @@ fn run(cli: Cli) -> Result<()> {
             input,
             format,
             long,
+            exclude,
         } => {
             let fmt = resolve_input_format(format, &input)?;
             let entries = match fmt {
@@ -98,8 +112,14 @@ fn run(cli: Cli) -> Result<()> {
                 )),
             };
 
+            let excludes = filter::build_exclude_set(&exclude)?;
             let mut stdout = std::io::stdout().lock();
             for entry in &entries {
+                if !excludes.is_empty()
+                    && excludes.is_match(entry.path.as_str().trim_end_matches('/'))
+                {
+                    continue;
+                }
                 if long {
                     let kind = if entry.is_dir { "d" } else { "-" };
                     let _ = writeln!(

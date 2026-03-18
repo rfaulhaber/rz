@@ -5,7 +5,8 @@ use std::io::Cursor;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::error::{Error, Result};
-use crate::{ArchiveInfo, Entry};
+use crate::filter;
+use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
@@ -13,16 +14,16 @@ use crate::{ArchiveInfo, Entry};
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    level: Option<u32>,
+    opts: &CompressOpts,
 ) -> Result<()> {
-    let level = level.unwrap_or(6);
+    let level = opts.level.unwrap_or(6);
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
     let encoder = xz2::write::XzEncoder::new(buf, level);
     let mut builder = tar::Builder::new(encoder);
 
     for input in inputs {
-        append_input(&mut builder, input)?;
+        append_input(&mut builder, input, &opts.excludes)?;
     }
 
     let encoder = builder.into_inner()?;
@@ -36,7 +37,7 @@ pub fn compress(
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    _level: Option<u32>,
+    opts: &CompressOpts,
 ) -> Result<()> {
     // lzma-rs provides a one-shot compress function, so we buffer the tar
     // archive in memory first, then xz-compress to the output file.
@@ -44,7 +45,7 @@ pub fn compress(
     {
         let mut builder = tar::Builder::new(&mut tar_data);
         for input in inputs {
-            append_input(&mut builder, input)?;
+            append_input(&mut builder, input, &opts.excludes)?;
         }
         builder.into_inner()?;
     }
@@ -57,26 +58,30 @@ pub fn compress(
     Ok(())
 }
 
-/// Append a single input (file or directory) to a tar builder.
+/// Append a single input (file or directory) to a tar builder, respecting excludes.
 fn append_input<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     input: &Utf8Path,
+    excludes: &globset::GlobSet,
 ) -> Result<()> {
     let meta = fs_err::symlink_metadata(input)?;
+    let name = input.file_name().unwrap_or(input.as_str());
+    if excludes.is_match(name) {
+        return Ok(());
+    }
     if meta.is_dir() {
-        builder.append_dir_all(input.file_name().unwrap_or(input.as_str()), input)?;
+        filter::append_dir_filtered(builder, input, name, excludes)?;
     } else {
-        builder.append_path_with_name(input, input.file_name().unwrap_or(input.as_str()))?;
+        builder.append_path_with_name(input, name)?;
     }
     Ok(())
 }
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, force: bool) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
     let mut archive = open_archive(input)?;
-    archive.set_overwrite(force);
-    archive.unpack(output)?;
+    filter::unpack_tar_filtered(&mut archive, output, opts)?;
     Ok(())
 }
 

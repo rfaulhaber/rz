@@ -26,4 +26,13 @@ pub enum Error {
 
     #[error("zip: {0}")]
     Zip(#[from] zip::result::ZipError),
+
+    #[error("invalid exclude pattern: {0}")]
+    InvalidExcludePattern(String),
+
+    #[error("file already exists: {0} (use --force to overwrite)")]
+    FileExists(Utf8PathBuf),
+
+    #[error("--strip-components is not supported for {0} format")]
+    StripComponentsUnsupported(String),
 }

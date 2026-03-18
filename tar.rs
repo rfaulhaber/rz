@@ -3,14 +3,15 @@ use std::io::{BufReader, BufWriter};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::error::{Error, Result};
-use crate::{ArchiveInfo, Entry};
+use crate::filter;
+use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    _level: Option<u32>,
+    opts: &CompressOpts,
 ) -> Result<()> {
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
@@ -18,10 +19,14 @@ pub fn compress(
 
     for input in inputs {
         let meta = fs_err::symlink_metadata(input)?;
+        let name = input.file_name().unwrap_or(input.as_str());
+        if opts.excludes.is_match(name) {
+            continue;
+        }
         if meta.is_dir() {
-            builder.append_dir_all(input.file_name().unwrap_or(input.as_str()), input)?;
+            filter::append_dir_filtered(&mut builder, input, name, &opts.excludes)?;
         } else {
-            builder.append_path_with_name(input, input.file_name().unwrap_or(input.as_str()))?;
+            builder.append_path_with_name(input, name)?;
         }
     }
 
@@ -34,12 +39,11 @@ pub fn compress(
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, force: bool) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
     let mut archive = tar::Archive::new(buf);
-    archive.set_overwrite(force);
-    archive.unpack(output)?;
+    filter::unpack_tar_filtered(&mut archive, output, opts)?;
     Ok(())
 }
 
