@@ -44,16 +44,36 @@
 
         formatter = pkgs.alejandra;
 
-        packages = {
-          ${projectName} = pkgs.rustPlatform.buildRustPackage {
-            pname = projectName;
-            version = "0.1.0";
-            src = ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+        packages = let
+          buildRz = features:
+            pkgs.rustPlatform.buildRustPackage {
+              inherit features;
+              pname = projectName;
+              version = "0.1.0";
+              src = ./.;
+              cargoLock.lockFile = ./Cargo.lock;
+            };
+          features = ["xz2" "bzip2"];
+          combinations = list:
+            if list == []
+            then [[]]
+            else let
+              rest = combinations (builtins.tail list);
+              x = builtins.head list;
+            in
+              rest ++ map (combo: [x] ++ combo) rest;
+          packageCombinations = builtins.filter (c: c != []) (combinations features);
+          mkName = combo: "with-" + builtins.concatStringsSep "-" combo;
+          mkAttrs = combo: {
+            name = mkName combo;
+            value = buildRz combo;
           };
-          default = self'.packages.${projectName};
-        };
-
+          featurePackages = builtins.listToAttrs (map mkAttrs packageCombinations);
+        in
+          {
+            default = buildRz [];
+          }
+          // featurePackages;
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             rust-bin.stable.latest.default
