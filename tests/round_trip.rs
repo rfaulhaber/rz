@@ -1,81 +1,92 @@
 mod helpers;
 
-use helpers::{assert_trees_match, build_file_tree, temp_utf8_dir, TestResult};
+use helpers::{TestResult, SEVEN_Z, TAR, TAR_GZ, TAR_XZ, TAR_ZST, ZIP};
 
 // ── tar.gz ───────────────────────────────────────────────────────────────────
 
 #[test]
 fn tar_gz_round_trip_directory() -> TestResult {
-    let (_guard, tmp) = temp_utf8_dir()?;
-
-    let tree = tmp.join("tree");
-    build_file_tree(&tree)?;
-
-    let archive = tmp.join("archive.tar.gz");
-    rz::tar_gz::compress(std::slice::from_ref(&tree), &archive, None)?;
-
-    let out = tmp.join("out");
-    fs_err::create_dir(&out)?;
-    rz::tar_gz::decompress(&archive, &out, false)?;
-
-    assert_trees_match(&tree, &out.join("tree"))?;
-    Ok(())
+    TAR_GZ.round_trip_directory(None)
 }
 
 #[test]
 fn tar_gz_round_trip_single_file() -> TestResult {
-    let (_guard, tmp) = temp_utf8_dir()?;
-
-    let file = tmp.join("single.txt");
-    fs_err::write(&file, b"single file content\n")?;
-
-    let archive = tmp.join("archive.tar.gz");
-    rz::tar_gz::compress(&[file], &archive, None)?;
-
-    let out = tmp.join("out");
-    fs_err::create_dir(&out)?;
-    rz::tar_gz::decompress(&archive, &out, false)?;
-
-    let extracted = fs_err::read_to_string(out.join("single.txt"))?;
-    assert_eq!(extracted, "single file content\n");
-    Ok(())
+    TAR_GZ.round_trip_single_file()
 }
 
 #[test]
 fn tar_gz_round_trip_custom_level() -> TestResult {
-    let (_guard, tmp) = temp_utf8_dir()?;
+    TAR_GZ.round_trip_directory(Some(9))
+}
 
-    let tree = tmp.join("tree");
-    build_file_tree(&tree)?;
+// ── tar (plain) ──────────────────────────────────────────────────────────────
 
-    let archive = tmp.join("archive.tar.gz");
-    rz::tar_gz::compress(std::slice::from_ref(&tree), &archive, Some(9))?;
+#[test]
+fn tar_round_trip_directory() -> TestResult {
+    TAR.round_trip_directory(None)
+}
 
-    let out = tmp.join("out");
-    fs_err::create_dir(&out)?;
-    rz::tar_gz::decompress(&archive, &out, false)?;
+#[test]
+fn tar_round_trip_single_file() -> TestResult {
+    TAR.round_trip_single_file()
+}
 
-    assert_trees_match(&tree, &out.join("tree"))?;
-    Ok(())
+// ── tar.zst ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn tar_zst_round_trip_directory() -> TestResult {
+    TAR_ZST.round_trip_directory(None)
+}
+
+#[test]
+fn tar_zst_round_trip_single_file() -> TestResult {
+    TAR_ZST.round_trip_single_file()
+}
+
+// ── tar.xz ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn tar_xz_round_trip_directory() -> TestResult {
+    TAR_XZ.round_trip_directory(None)
+}
+
+#[test]
+fn tar_xz_round_trip_single_file() -> TestResult {
+    TAR_XZ.round_trip_single_file()
+}
+
+// ── tar.bz2 (requires `bzip2` feature) ───────────────────────────────────────
+
+#[cfg(feature = "bzip2")]
+use helpers::TAR_BZ2;
+
+#[test]
+#[cfg(feature = "bzip2")]
+fn tar_bz2_round_trip_directory() -> TestResult {
+    TAR_BZ2.round_trip_directory(None)
+}
+
+#[test]
+#[cfg(feature = "bzip2")]
+fn tar_bz2_round_trip_single_file() -> TestResult {
+    TAR_BZ2.round_trip_single_file()
+}
+
+// ── zip ──────────────────────────────────────────────────────────────────────
+
+#[test]
+fn zip_round_trip_directory() -> TestResult {
+    ZIP.round_trip_directory(None)
+}
+
+#[test]
+fn zip_round_trip_single_file() -> TestResult {
+    ZIP.round_trip_single_file()
 }
 
 // ── 7z ───────────────────────────────────────────────────────────────────────
 
 #[test]
 fn seven_z_round_trip_directory() -> TestResult {
-    let (_guard, tmp) = temp_utf8_dir()?;
-
-    let tree = tmp.join("tree");
-    build_file_tree(&tree)?;
-
-    let archive = tmp.join("archive.7z");
-    rz::seven_z::compress(std::slice::from_ref(&tree), &archive, None)?;
-
-    let out = tmp.join("out");
-    rz::seven_z::decompress(&archive, &out, false)?;
-
-    // sevenz_rust2 stores directory contents directly (no wrapping directory),
-    // so files extract into `out/` rather than `out/tree/`.
-    assert_trees_match(&tree, &out)?;
-    Ok(())
+    SEVEN_Z.round_trip_directory(None)
 }

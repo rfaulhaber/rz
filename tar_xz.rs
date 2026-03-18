@@ -1,0 +1,153 @@
+use std::io::{BufReader, BufWriter};
+#[cfg(not(feature = "xz2"))]
+use std::io::Cursor;
+
+use camino::{Utf8Path, Utf8PathBuf};
+
+use crate::error::{Error, Result};
+use crate::{ArchiveInfo, Entry};
+
+// ── Compress ──────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "xz2")]
+pub fn compress(
+    inputs: &[Utf8PathBuf],
+    output: &Utf8Path,
+    level: Option<u32>,
+) -> Result<()> {
+    let level = level.unwrap_or(6);
+    let file = fs_err::File::create(output)?;
+    let buf = BufWriter::new(file);
+    let encoder = xz2::write::XzEncoder::new(buf, level);
+    let mut builder = tar::Builder::new(encoder);
+
+    for input in inputs {
+        append_input(&mut builder, input)?;
+    }
+
+    let encoder = builder.into_inner()?;
+    let buf = encoder.finish()?;
+    let file = buf.into_inner().map_err(std::io::Error::other)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(feature = "xz2"))]
+pub fn compress(
+    inputs: &[Utf8PathBuf],
+    output: &Utf8Path,
+    _level: Option<u32>,
+) -> Result<()> {
+    // lzma-rs provides a one-shot compress function, so we buffer the tar
+    // archive in memory first, then xz-compress to the output file.
+    let mut tar_data = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_data);
+        for input in inputs {
+            append_input(&mut builder, input)?;
+        }
+        builder.into_inner()?;
+    }
+
+    let file = fs_err::File::create(output)?;
+    let mut buf = BufWriter::new(file);
+    lzma_rs::xz_compress(&mut Cursor::new(tar_data), &mut buf)?;
+    let file = buf.into_inner().map_err(std::io::Error::other)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Append a single input (file or directory) to a tar builder.
+fn append_input<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    input: &Utf8Path,
+) -> Result<()> {
+    let meta = fs_err::symlink_metadata(input)?;
+    if meta.is_dir() {
+        builder.append_dir_all(input.file_name().unwrap_or(input.as_str()), input)?;
+    } else {
+        builder.append_path_with_name(input, input.file_name().unwrap_or(input.as_str()))?;
+    }
+    Ok(())
+}
+
+// ── Decompress ────────────────────────────────────────────────────────────────
+
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, force: bool) -> Result<()> {
+    let mut archive = open_archive(input)?;
+    archive.set_overwrite(force);
+    archive.unpack(output)?;
+    Ok(())
+}
+
+// ── List ──────────────────────────────────────────────────────────────────────
+
+pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
+    let mut archive = open_archive(input)?;
+
+    let mut entries = Vec::new();
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let header = entry.header();
+        let path = entry.path()?;
+        let path = Utf8PathBuf::try_from(path.into_owned())
+            .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+        entries.push(Entry {
+            path,
+            size: header.size()?,
+            mtime: header.mtime()?,
+            mode: header.mode()?,
+            is_dir: header.entry_type().is_dir(),
+        });
+    }
+    Ok(entries)
+}
+
+// ── Info ──────────────────────────────────────────────────────────────────────
+
+pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
+    let compressed_size = fs_err::metadata(input)?.len();
+
+    let mut archive = open_archive(input)?;
+
+    let mut entry_count: usize = 0;
+    let mut total_uncompressed: u64 = 0;
+    for entry in archive.entries()? {
+        let entry = entry?;
+        total_uncompressed += entry.header().size()?;
+        entry_count += 1;
+    }
+
+    Ok(ArchiveInfo {
+        format: "tar.xz",
+        entry_count,
+        total_uncompressed,
+        compressed_size,
+    })
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Open a `.tar.xz` file and return a tar archive with xz decompression.
+///
+/// With the `xz2` feature this streams through the C-backed liblzma decoder.
+/// Without it, the entire archive is decompressed into memory via `lzma-rs`.
+#[cfg(feature = "xz2")]
+fn open_archive(
+    input: &Utf8Path,
+) -> Result<tar::Archive<xz2::read::XzDecoder<BufReader<fs_err::File>>>> {
+    let file = fs_err::File::open(input)?;
+    let buf = BufReader::new(file);
+    let decoder = xz2::read::XzDecoder::new(buf);
+    Ok(tar::Archive::new(decoder))
+}
+
+#[cfg(not(feature = "xz2"))]
+fn open_archive(input: &Utf8Path) -> Result<tar::Archive<Cursor<Vec<u8>>>> {
+    let file = fs_err::File::open(input)?;
+    let mut buf = BufReader::new(file);
+    let mut tar_data = Vec::new();
+    lzma_rs::xz_decompress(&mut buf, &mut tar_data)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(tar::Archive::new(Cursor::new(tar_data)))
+}

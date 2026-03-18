@@ -23,4 +23,7 @@ pub enum Error {
 
     #[error("7z: {0}")]
     SevenZ(#[from] sevenz_rust2::Error),
+
+    #[error("zip: {0}")]
+    Zip(#[from] zip::result::ZipError),
 }
