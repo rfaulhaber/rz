@@ -7,6 +7,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::{Error, Result};
 use crate::filter;
+use crate::progress::ProgressReport;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
@@ -14,7 +15,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    opts: &CompressOpts,
+    opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let file = fs_err::File::create(output)?;
     let mut zip = ZipWriter::new(file);
@@ -30,11 +31,14 @@ pub fn compress(
             continue;
         }
         if meta.is_dir() {
-            add_dir_recursive(&mut zip, input, name, options, &opts.excludes)?;
+            add_dir_recursive(&mut zip, input, name, options, &opts.excludes, opts.progress)?;
         } else {
             zip.start_file(name, options)?;
             let data = fs_err::read(input)?;
+            let size = data.len() as u64;
             io::Write::write_all(&mut zip, &data)?;
+            opts.progress.set_entry(name);
+            opts.progress.inc(size);
         }
     }
 
@@ -50,6 +54,7 @@ fn add_dir_recursive(
     prefix: &str,
     options: SimpleFileOptions,
     excludes: &GlobSet,
+    progress: &dyn ProgressReport,
 ) -> Result<()> {
     zip.add_directory(format!("{prefix}/"), options)?;
 
@@ -75,11 +80,14 @@ fn add_dir_recursive(
         }
 
         if entry.file_type()?.is_dir() {
-            add_dir_recursive(zip, child, &name, options, excludes)?;
+            add_dir_recursive(zip, child, &name, options, excludes, progress)?;
         } else {
             zip.start_file(&name, options)?;
             let data = fs_err::read(child)?;
+            let size = data.len() as u64;
             io::Write::write_all(zip, &data)?;
+            progress.set_entry(&name);
+            progress.inc(size);
         }
     }
     Ok(())
@@ -87,7 +95,7 @@ fn add_dir_recursive(
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let mut archive = ZipArchive::new(file)?;
 
@@ -118,7 +126,9 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) ->
                 return Err(Error::FileExists(out_path));
             }
             let mut out_file = fs_err::File::create(&out_path)?;
-            io::copy(&mut entry, &mut out_file)?;
+            let written = io::copy(&mut entry, &mut out_file)?;
+            opts.progress.set_entry(stripped.as_str());
+            opts.progress.inc(written);
         }
     }
     Ok(())

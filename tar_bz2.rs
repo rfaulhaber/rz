@@ -14,7 +14,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    opts: &CompressOpts,
+    opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let compression = match opts.level {
         Some(l) => Compression::try_new(l)
@@ -33,9 +33,12 @@ pub fn compress(
             continue;
         }
         if meta.is_dir() {
-            filter::append_dir_filtered(&mut builder, input, name, &opts.excludes)?;
+            filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.progress)?;
         } else {
+            let size = meta.len();
             builder.append_path_with_name(input, name)?;
+            opts.progress.set_entry(name);
+            opts.progress.inc(size);
         }
     }
 
@@ -50,7 +53,7 @@ pub fn compress(
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
     let bz = BzDecoder::new(buf);

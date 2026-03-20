@@ -6,6 +6,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::error::{Error, Result};
 use crate::filter;
+use crate::progress::ProgressReport;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
@@ -14,7 +15,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    opts: &CompressOpts,
+    opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let level = opts.level.unwrap_or(6);
     let file = fs_err::File::create(output)?;
@@ -23,7 +24,7 @@ pub fn compress(
     let mut builder = tar::Builder::new(encoder);
 
     for input in inputs {
-        append_input(&mut builder, input, &opts.excludes)?;
+        append_input(&mut builder, input, &opts.excludes, opts.progress)?;
     }
 
     let encoder = builder.into_inner()?;
@@ -37,7 +38,7 @@ pub fn compress(
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    opts: &CompressOpts,
+    opts: &CompressOpts<'_>,
 ) -> Result<()> {
     // lzma-rs provides a one-shot compress function, so we buffer the tar
     // archive in memory first, then xz-compress to the output file.
@@ -45,7 +46,7 @@ pub fn compress(
     {
         let mut builder = tar::Builder::new(&mut tar_data);
         for input in inputs {
-            append_input(&mut builder, input, &opts.excludes)?;
+            append_input(&mut builder, input, &opts.excludes, opts.progress)?;
         }
         builder.into_inner()?;
     }
@@ -63,6 +64,7 @@ fn append_input<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     input: &Utf8Path,
     excludes: &globset::GlobSet,
+    progress: &dyn ProgressReport,
 ) -> Result<()> {
     let meta = fs_err::symlink_metadata(input)?;
     let name = input.file_name().unwrap_or(input.as_str());
@@ -70,16 +72,19 @@ fn append_input<W: std::io::Write>(
         return Ok(());
     }
     if meta.is_dir() {
-        filter::append_dir_filtered(builder, input, name, excludes)?;
+        filter::append_dir_filtered(builder, input, name, excludes, progress)?;
     } else {
+        let size = meta.len();
         builder.append_path_with_name(input, name)?;
+        progress.set_entry(name);
+        progress.inc(size);
     }
     Ok(())
 }
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
     let mut archive = open_archive(input)?;
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
     Ok(())

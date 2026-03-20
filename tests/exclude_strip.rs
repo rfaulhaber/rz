@@ -9,25 +9,25 @@ use rz::{CompressOpts, DecompressOpts};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn compress_opts(excludes: &[&str]) -> CompressOpts {
-    CompressOpts {
-        level: None,
-        excludes: build_exclude_set(
+fn compress_opts(excludes: &[&str]) -> CompressOpts<'static> {
+    CompressOpts::new(
+        None,
+        build_exclude_set(
             &excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
         )
         .unwrap_or_else(|_| GlobSet::empty()),
-    }
+    )
 }
 
-fn decompress_opts(strip: u32, excludes: &[&str]) -> DecompressOpts {
-    DecompressOpts {
-        force: false,
-        strip_components: strip,
-        excludes: build_exclude_set(
+fn decompress_opts(strip: u32, excludes: &[&str]) -> DecompressOpts<'static> {
+    DecompressOpts::new(
+        false,
+        strip,
+        build_exclude_set(
             &excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
         )
         .unwrap_or_else(|_| GlobSet::empty()),
-    }
+    )
 }
 
 /// Build a richer tree for exclude / strip tests:

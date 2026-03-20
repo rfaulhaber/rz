@@ -13,7 +13,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    opts: &CompressOpts,
+    opts: &CompressOpts<'_>,
 ) -> Result<()> {
     // ruzstd's compressor is pull-based (Read → Write), so we build the tar
     // archive in memory first, then compress to the output file.
@@ -27,17 +27,25 @@ pub fn compress(
                 continue;
             }
             if meta.is_dir() {
-                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes)?;
+                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.progress)?;
             } else {
+                let size = meta.len();
                 builder.append_path_with_name(input, name)?;
+                opts.progress.set_entry(name);
+                opts.progress.inc(size);
             }
         }
         builder.into_inner()?;
     }
 
+    let level = match opts.level {
+        Some(0) => CompressionLevel::Uncompressed,
+        _ => CompressionLevel::Fastest,
+    };
+
     let file = fs_err::File::create(output)?;
     let mut buf = BufWriter::new(file);
-    ruzstd::encoding::compress(Cursor::new(tar_data), &mut buf, CompressionLevel::Fastest);
+    ruzstd::encoding::compress(Cursor::new(tar_data), &mut buf, level);
     let file = buf.into_inner().map_err(std::io::Error::other)?;
     file.sync_all()?;
 
@@ -46,7 +54,7 @@ pub fn compress(
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
     let decoder = open_decoder(input)?;
     let mut archive = tar::Archive::new(decoder);
     filter::unpack_tar_filtered(&mut archive, output, opts)?;

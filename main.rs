@@ -7,6 +7,7 @@ use rz::cmd::{Cli, Command, Format};
 use rz::error::{Error, Result};
 use rz::filter;
 use rz::format::{resolve_compress_format, resolve_input_format};
+use rz::progress::{BarProgress, NoProgress, ProgressReport};
 use rz::{seven_z, tar, tar_gz, tar_xz, tar_zst, zip, CompressOpts, DecompressOpts};
 #[cfg(feature = "bzip2")]
 use rz::tar_bz2;
@@ -28,7 +29,6 @@ fn run(cli: Cli) -> Result<()> {
             output,
             format,
             level,
-            threads: _,
             exclude,
         } => {
             let fmt = resolve_compress_format(
@@ -39,9 +39,15 @@ fn run(cli: Cli) -> Result<()> {
                 Some(o) => o,
                 None => fmt.default_output(&input[0]),
             };
+            let progress: Box<dyn ProgressReport> = if cli.progress {
+                Box::new(BarProgress::spinner())
+            } else {
+                Box::new(NoProgress)
+            };
             let opts = CompressOpts {
                 level,
                 excludes: filter::build_exclude_set(&exclude)?,
+                progress: &*progress,
             };
             match fmt {
                 Format::Zip => zip::compress(&input, &output, &opts)?,
@@ -57,6 +63,7 @@ fn run(cli: Cli) -> Result<()> {
                     format!("{:?}", other),
                 )),
             }
+            progress.finish();
         }
 
         Command::Decompress {
@@ -69,10 +76,17 @@ fn run(cli: Cli) -> Result<()> {
         } => {
             let fmt = resolve_input_format(format, &input)?;
             let output = output.unwrap_or_else(|| ".".into());
+            let progress: Box<dyn ProgressReport> = if cli.progress {
+                let file_size = fs_err::metadata(&input)?.len();
+                Box::new(BarProgress::bytes(file_size))
+            } else {
+                Box::new(NoProgress)
+            };
             let opts = DecompressOpts {
                 force,
                 strip_components,
                 excludes: filter::build_exclude_set(&exclude)?,
+                progress: &*progress,
             };
             match fmt {
                 Format::Zip => zip::decompress(&input, &output, &opts)?,
@@ -88,6 +102,7 @@ fn run(cli: Cli) -> Result<()> {
                     format!("{:?}", other),
                 )),
             }
+            progress.finish();
         }
 
         Command::List {

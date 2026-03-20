@@ -1,10 +1,13 @@
 use camino::Utf8PathBuf;
 use globset::GlobSet;
 
+use crate::progress::{NoProgress, ProgressReport};
+
 pub mod cmd;
 pub mod error;
 pub mod filter;
 pub mod format;
+pub mod progress;
 pub mod seven_z;
 pub mod tar;
 #[cfg(feature = "bzip2")]
@@ -32,14 +35,39 @@ pub struct ArchiveInfo {
 }
 
 /// Options for compress operations.
-pub struct CompressOpts {
+pub struct CompressOpts<'a> {
     pub level: Option<u32>,
     pub excludes: GlobSet,
+    pub progress: &'a dyn ProgressReport,
 }
 
 /// Options for decompress operations.
-pub struct DecompressOpts {
+pub struct DecompressOpts<'a> {
     pub force: bool,
     pub strip_components: u32,
     pub excludes: GlobSet,
+    pub progress: &'a dyn ProgressReport,
+}
+
+impl CompressOpts<'_> {
+    /// Construct opts with no progress reporting (for tests / programmatic use).
+    pub fn new(level: Option<u32>, excludes: GlobSet) -> CompressOpts<'static> {
+        CompressOpts {
+            level,
+            excludes,
+            progress: &NoProgress,
+        }
+    }
+}
+
+impl DecompressOpts<'_> {
+    /// Construct opts with no progress reporting (for tests / programmatic use).
+    pub fn new(force: bool, strip_components: u32, excludes: GlobSet) -> DecompressOpts<'static> {
+        DecompressOpts {
+            force,
+            strip_components,
+            excludes,
+            progress: &NoProgress,
+        }
+    }
 }

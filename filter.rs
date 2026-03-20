@@ -2,6 +2,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::error::{Error, Result};
+use crate::progress::ProgressReport;
 use crate::DecompressOpts;
 
 /// Build a [`GlobSet`] from exclude patterns.
@@ -62,12 +63,13 @@ pub fn strip_components(path: &Utf8Path, n: u32) -> Option<Utf8PathBuf> {
 // ── Tar helpers ──────────────────────────────────────────────────────────────
 
 /// Walk a directory tree and append entries to a tar builder, skipping paths
-/// that match the exclude set.
+/// that match the exclude set.  Reports progress per file via `progress`.
 pub fn append_dir_filtered<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     dir: &Utf8Path,
     prefix: &str,
     excludes: &GlobSet,
+    progress: &dyn ProgressReport,
 ) -> Result<()> {
     builder.append_dir(prefix, dir)?;
 
@@ -93,20 +95,23 @@ pub fn append_dir_filtered<W: std::io::Write>(
         let utf8_path = Utf8Path::new(entry_str);
 
         if entry.file_type()?.is_dir() {
-            append_dir_filtered(builder, utf8_path, &archive_name, excludes)?;
+            append_dir_filtered(builder, utf8_path, &archive_name, excludes, progress)?;
         } else {
+            let meta = fs_err::metadata(utf8_path)?;
             builder.append_path_with_name(utf8_path, &archive_name)?;
+            progress.set_entry(&archive_name);
+            progress.inc(meta.len());
         }
     }
     Ok(())
 }
 
 /// Extract entries from a tar archive, honouring exclude patterns and
-/// path-component stripping.
+/// path-component stripping.  Reports progress per entry.
 pub fn unpack_tar_filtered<R: std::io::Read>(
     archive: &mut tar::Archive<R>,
     output: &Utf8Path,
-    opts: &DecompressOpts,
+    opts: &DecompressOpts<'_>,
 ) -> Result<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -142,6 +147,7 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             return Err(Error::FileExists(dest));
         }
 
+        opts.progress.set_entry(stripped.as_str());
         entry.unpack(&dest)?;
     }
     Ok(())

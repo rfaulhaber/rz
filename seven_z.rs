@@ -8,7 +8,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 pub fn compress(
     inputs: &[Utf8PathBuf],
     output: &Utf8Path,
-    opts: &CompressOpts,
+    opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let mut writer = sevenz_rust2::ArchiveWriter::create(output)?;
     for input in inputs {
@@ -22,7 +22,7 @@ pub fn compress(
 
 // ── Decompress ────────────────────────────────────────────────────────────────
 
-pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts) -> Result<()> {
+pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
     if opts.strip_components > 0 {
         return Err(Error::StripComponentsUnsupported("7z".to_owned()));
     }

@@ -2,14 +2,14 @@ use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(name = "rz", about = "Multi-format compression and decompression tool")]
+#[command(name = "rz", version, about = "Multi-format compression and decompression tool")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
-    /// Global verbosity
+    /// Show a progress bar
     #[arg(short, long, global = true)]
-    pub verbose: bool,
+    pub progress: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -32,10 +32,6 @@ pub enum Command {
         /// Compression level (format-dependent)
         #[arg(short, long)]
         level: Option<u32>,
-
-        /// Number of threads (0 = all cores)
-        #[arg(short, long, default_value_t = 0)]
-        threads: usize,
 
         /// Exclude files matching a glob pattern (repeatable)
         #[arg(long)]

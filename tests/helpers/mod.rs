@@ -19,8 +19,8 @@ pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// standardised round-trip / list / info tests without duplicating the
 /// boilerplate.
 pub struct FormatHarness {
-    pub compress: fn(&[Utf8PathBuf], &Utf8Path, &CompressOpts) -> rz::error::Result<()>,
-    pub decompress: fn(&Utf8Path, &Utf8Path, &DecompressOpts) -> rz::error::Result<()>,
+    pub compress: fn(&[Utf8PathBuf], &Utf8Path, &CompressOpts<'_>) -> rz::error::Result<()>,
+    pub decompress: fn(&Utf8Path, &Utf8Path, &DecompressOpts<'_>) -> rz::error::Result<()>,
     pub list: fn(&Utf8Path) -> rz::error::Result<Vec<rz::Entry>>,
     pub info: fn(&Utf8Path) -> rz::error::Result<rz::ArchiveInfo>,
     pub ext: &'static str,
@@ -103,21 +103,14 @@ pub const SEVEN_Z: FormatHarness = FormatHarness {
     preserves_top_dir: false,
 };
 
-/// Build default compress opts (no excludes).
-pub fn default_compress_opts(level: Option<u32>) -> CompressOpts {
-    CompressOpts {
-        level,
-        excludes: GlobSet::empty(),
-    }
+/// Build default compress opts (no excludes, no progress).
+pub fn default_compress_opts(level: Option<u32>) -> CompressOpts<'static> {
+    CompressOpts::new(level, GlobSet::empty())
 }
 
-/// Build default decompress opts (no strip, no excludes, no overwrite).
-pub fn default_decompress_opts() -> DecompressOpts {
-    DecompressOpts {
-        force: false,
-        strip_components: 0,
-        excludes: GlobSet::empty(),
-    }
+/// Build default decompress opts (no strip, no excludes, no overwrite, no progress).
+pub fn default_decompress_opts() -> DecompressOpts<'static> {
+    DecompressOpts::new(false, 0, GlobSet::empty())
 }
 
 impl FormatHarness {
