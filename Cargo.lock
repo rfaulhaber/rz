@@ -812,7 +812,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rz"
+name = "rz-archive"
 version = "0.1.0"
 dependencies = [
  "bzip2",

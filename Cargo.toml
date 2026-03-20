@@ -1,5 +1,5 @@
 [package]
-name = "rz"
+name = "rz-archive"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
@@ -11,6 +11,7 @@ name = "rz"
 path = "main.rs"
 
 [lib]
+name = "rz"
 path = "lib.rs"
 
 [features]
