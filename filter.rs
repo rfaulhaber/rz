@@ -5,6 +5,30 @@ use crate::error::{Error, Result};
 use crate::progress::ProgressReport;
 use crate::DecompressOpts;
 
+/// Returns `true` when an entry at `path` should be extracted, considering
+/// both include and exclude filters.  When includes are non-empty, the path
+/// must match at least one include pattern.  Excludes are always applied
+/// afterward.
+pub fn should_extract(path: &str, includes: &GlobSet, excludes: &GlobSet) -> bool {
+    let clean = path.trim_end_matches('/');
+    if !includes.is_empty() && !includes.is_match(clean) {
+        return false;
+    }
+    if !excludes.is_empty() && excludes.is_match(clean) {
+        return false;
+    }
+    true
+}
+
+/// Build a [`GlobSet`] from include patterns.
+///
+/// Uses the same `**/` prefix logic as [`build_exclude_set`] so bare patterns
+/// match at any directory depth.
+pub fn build_include_set(patterns: &[String]) -> Result<GlobSet> {
+    // Reuse the same glob-building logic as excludes.
+    build_glob_set(patterns)
+}
+
 /// Build a [`GlobSet`] from exclude patterns.
 ///
 /// Patterns without a `/` are automatically prefixed with `**/` so they match
@@ -12,6 +36,15 @@ use crate::DecompressOpts;
 /// also generates a `<pattern>/**` variant so that excluding a directory name
 /// also excludes everything inside it.
 pub fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
+    build_glob_set(patterns)
+}
+
+/// Build a [`GlobSet`] from glob patterns.
+///
+/// Bare patterns (without `/`) are prefixed with `**/` for recursive matching.
+/// Each pattern also generates a `<pattern>/**` variant to match directory
+/// contents.
+fn build_glob_set(patterns: &[String]) -> Result<GlobSet> {
     if patterns.is_empty() {
         return Ok(GlobSet::empty());
     }
@@ -28,7 +61,7 @@ pub fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
             .map_err(|e| Error::InvalidExcludePattern(e.to_string()))?;
         builder.add(glob);
 
-        // Also exclude contents of matching directories.
+        // Also match contents of matching directories.
         let dir_glob = GlobBuilder::new(&format!("{effective}/**"))
             .literal_separator(true)
             .build()
@@ -60,7 +93,60 @@ pub fn strip_components(path: &Utf8Path, n: u32) -> Option<Utf8PathBuf> {
     }
 }
 
+// ── Stdout extraction ────────────────────────────────────────────────────────
+
+/// Extract matching tar entries to a writer (typically stdout), skipping
+/// directory entries.  Applies include/exclude filters and strip-components.
+pub fn extract_tar_to_writer<R: std::io::Read, W: std::io::Write>(
+    archive: &mut tar::Archive<R>,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let orig_path = entry.path()?;
+        let orig_path = Utf8PathBuf::try_from(orig_path.into_owned())
+            .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+
+        if !should_extract(orig_path.as_str(), &opts.includes, &opts.excludes) {
+            continue;
+        }
+
+        let stripped = match strip_components(&orig_path, opts.strip_components) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Skip directory entries — only files have content.
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+
+        opts.progress.set_entry(stripped.as_str());
+        std::io::copy(&mut entry, writer)?;
+    }
+    Ok(())
+}
+
 // ── Tar helpers ──────────────────────────────────────────────────────────────
+
+/// Fully decompress every entry in a tar archive to [`io::sink`], verifying
+/// data integrity beyond what header-only iteration (`list`) provides.
+pub fn verify_tar_entries<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    progress: &dyn ProgressReport,
+) -> Result<()> {
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let path = Utf8PathBuf::try_from(path.into_owned())
+            .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+        progress.set_entry(path.as_str());
+        let written = std::io::copy(&mut entry, &mut std::io::sink())?;
+        progress.inc(written);
+    }
+    Ok(())
+}
 
 /// Walk a directory tree and append entries to a tar builder, skipping paths
 /// that match the exclude set.  Reports progress per file via `progress`.
@@ -119,9 +205,8 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         let orig_path = Utf8PathBuf::try_from(orig_path.into_owned())
             .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
 
-        // Exclude check against the original (pre-strip) path.
-        let check_path = orig_path.as_str().trim_end_matches('/');
-        if opts.excludes.is_match(check_path) {
+        // Include/exclude check against the original (pre-strip) path.
+        if !should_extract(orig_path.as_str(), &opts.includes, &opts.excludes) {
             continue;
         }
 

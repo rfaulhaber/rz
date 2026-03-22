@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use indicatif::{ProgressBar, ProgressStyle};
 
 /// Trait for reporting progress during archive operations.
@@ -78,6 +80,40 @@ impl ProgressReport for BarProgress {
 
     fn finish(&self) {
         self.bar.finish_and_clear();
+    }
+}
+
+// ── Verbose decorator ───────────────────────────────────────────────────────
+
+/// Decorator that prints each entry name to stderr before delegating to an
+/// inner [`ProgressReport`].  Used when `--verbose` is passed.
+pub struct VerboseReport<'a> {
+    inner: &'a dyn ProgressReport,
+}
+
+impl<'a> VerboseReport<'a> {
+    pub fn new(inner: &'a dyn ProgressReport) -> Self {
+        Self { inner }
+    }
+}
+
+impl ProgressReport for VerboseReport<'_> {
+    fn set_length(&self, len: u64) {
+        self.inner.set_length(len);
+    }
+
+    fn inc(&self, n: u64) {
+        self.inner.inc(n);
+    }
+
+    fn set_entry(&self, name: &str) {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{name}");
+        self.inner.set_entry(name);
+    }
+
+    fn finish(&self) {
+        self.inner.finish();
     }
 }
 

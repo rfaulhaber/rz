@@ -35,4 +35,13 @@ pub enum Error {
 
     #[error("--strip-components is not supported for {0} format")]
     StripComponentsUnsupported(String),
+
+    #[error("{0} format does not support reading from stdin (requires seekable input)")]
+    StdinNotSupported(String),
+
+    #[error("{0} format does not support writing to stdout (requires seekable output)")]
+    StdoutNotSupported(String),
+
+    #[error("cannot infer format from stdin; specify --format")]
+    CannotInferFormatStdin,
 }

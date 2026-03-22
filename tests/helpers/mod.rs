@@ -108,9 +108,9 @@ pub fn default_compress_opts(level: Option<u32>) -> CompressOpts<'static> {
     CompressOpts::new(level, GlobSet::empty())
 }
 
-/// Build default decompress opts (no strip, no excludes, no overwrite, no progress).
+/// Build default decompress opts (no strip, no includes/excludes, no overwrite, no progress).
 pub fn default_decompress_opts() -> DecompressOpts<'static> {
-    DecompressOpts::new(false, 0, GlobSet::empty())
+    DecompressOpts::new(false, 0, GlobSet::empty(), GlobSet::empty())
 }
 
 impl FormatHarness {

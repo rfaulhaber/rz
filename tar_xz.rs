@@ -82,12 +82,100 @@ fn append_input<W: std::io::Write>(
     Ok(())
 }
 
+// ── Compress to writer ───────────────────────────────────────────────────────
+
+#[cfg(feature = "xz2")]
+pub fn compress_to_writer<W: std::io::Write>(
+    inputs: &[Utf8PathBuf],
+    writer: W,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    let level = opts.level.unwrap_or(6);
+    let buf = BufWriter::new(writer);
+    let encoder = xz2::write::XzEncoder::new(buf, level);
+    let mut builder = tar::Builder::new(encoder);
+
+    for input in inputs {
+        append_input(&mut builder, input, &opts.excludes, opts.progress)?;
+    }
+
+    let encoder = builder.into_inner()?;
+    encoder.finish()?;
+    Ok(())
+}
+
+#[cfg(not(feature = "xz2"))]
+pub fn compress_to_writer<W: std::io::Write>(
+    inputs: &[Utf8PathBuf],
+    mut writer: W,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    let mut tar_data = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_data);
+        for input in inputs {
+            append_input(&mut builder, input, &opts.excludes, opts.progress)?;
+        }
+        builder.into_inner()?;
+    }
+    lzma_rs::xz_compress(&mut Cursor::new(tar_data), &mut writer)?;
+    Ok(())
+}
+
 // ── Decompress ────────────────────────────────────────────────────────────────
 
 pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
     let mut archive = open_archive(input)?;
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
     Ok(())
+}
+
+#[cfg(feature = "xz2")]
+pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+    let decoder = xz2::read::XzDecoder::new(BufReader::new(reader));
+    let mut archive = tar::Archive::new(decoder);
+    filter::unpack_tar_filtered(&mut archive, output, opts)?;
+    Ok(())
+}
+
+#[cfg(not(feature = "xz2"))]
+pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+    let mut tar_data = Vec::new();
+    lzma_rs::xz_decompress(&mut BufReader::new(reader), &mut tar_data)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut archive = tar::Archive::new(Cursor::new(tar_data));
+    filter::unpack_tar_filtered(&mut archive, output, opts)?;
+    Ok(())
+}
+
+// ── Decompress to writer ─────────────────────────────────────────────────────
+
+pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+    let mut archive = open_archive(input)?;
+    filter::extract_tar_to_writer(&mut archive, writer, opts)
+}
+
+#[cfg(feature = "xz2")]
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+    let decoder = xz2::read::XzDecoder::new(BufReader::new(reader));
+    let mut archive = tar::Archive::new(decoder);
+    filter::extract_tar_to_writer(&mut archive, writer, opts)
+}
+
+#[cfg(not(feature = "xz2"))]
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+    let mut tar_data = Vec::new();
+    lzma_rs::xz_decompress(&mut BufReader::new(reader), &mut tar_data)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut archive = tar::Archive::new(Cursor::new(tar_data));
+    filter::extract_tar_to_writer(&mut archive, writer, opts)
+}
+
+// ── Test ──────────────────────────────────────────────────────────────────────
+
+pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
+    let mut archive = open_archive(input)?;
+    filter::verify_tar_entries(&mut archive, progress)
 }
 
 // ── List ──────────────────────────────────────────────────────────────────────

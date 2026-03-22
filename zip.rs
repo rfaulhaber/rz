@@ -103,9 +103,8 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
         let mut entry = archive.by_index(i)?;
         let name = Utf8PathBuf::from(entry.name());
 
-        // Exclude check against the original (pre-strip) path.
-        let check_path = name.as_str().trim_end_matches('/');
-        if opts.excludes.is_match(check_path) {
+        // Include/exclude check against the original (pre-strip) path.
+        if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
             continue;
         }
 
@@ -130,6 +129,51 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             opts.progress.set_entry(stripped.as_str());
             opts.progress.inc(written);
         }
+    }
+    Ok(())
+}
+
+// ── Decompress to writer ─────────────────────────────────────────────────────
+
+pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+    let file = fs_err::File::open(input)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let name = Utf8PathBuf::from(entry.name());
+
+        if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
+            continue;
+        }
+
+        let stripped = match filter::strip_components(&name, opts.strip_components) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if entry.is_dir() {
+            continue;
+        }
+
+        opts.progress.set_entry(stripped.as_str());
+        io::copy(&mut entry, writer)?;
+    }
+    Ok(())
+}
+
+// ── Test ──────────────────────────────────────────────────────────────────────
+
+pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
+    let file = fs_err::File::open(input)?;
+    let mut archive = ZipArchive::new(file)?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let name = entry.name().to_owned();
+        progress.set_entry(&name);
+        let written = io::copy(&mut entry, &mut io::sink())?;
+        progress.inc(written);
     }
     Ok(())
 }

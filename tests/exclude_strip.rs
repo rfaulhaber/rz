@@ -23,6 +23,7 @@ fn decompress_opts(strip: u32, excludes: &[&str]) -> DecompressOpts<'static> {
     DecompressOpts::new(
         false,
         strip,
+        GlobSet::empty(),
         build_exclude_set(
             &excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
         )

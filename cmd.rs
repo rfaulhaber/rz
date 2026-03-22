@@ -10,6 +10,10 @@ pub struct Cli {
     /// Show a progress bar
     #[arg(short, long, global = true)]
     pub progress: bool,
+
+    /// Print each entry name to stderr as it is processed
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -56,6 +60,10 @@ pub enum Command {
         #[arg(short = 'F', long)]
         force: bool,
 
+        /// Write extracted file contents to stdout instead of disk
+        #[arg(short = 'O', long)]
+        to_stdout: bool,
+
         /// Strip N leading path components during extraction
         #[arg(long, default_value_t = 0)]
         strip_components: u32,
@@ -63,6 +71,13 @@ pub enum Command {
         /// Exclude entries matching a glob pattern (repeatable)
         #[arg(long)]
         exclude: Vec<String>,
+
+        /// Include only entries matching a glob pattern (repeatable)
+        #[arg(long)]
+        include: Vec<String>,
+
+        /// Extract only these specific paths from the archive
+        paths: Vec<String>,
     },
 
     /// List archive contents
@@ -80,6 +95,15 @@ pub enum Command {
         /// Exclude entries matching a glob pattern (repeatable)
         #[arg(long)]
         exclude: Vec<String>,
+    },
+
+    /// Test archive integrity (fully decompress without writing to disk)
+    #[command(alias = "t")]
+    Test {
+        input: Utf8PathBuf,
+
+        #[arg(short, long)]
+        format: Option<Format>,
     },
 
     /// Show archive metadata

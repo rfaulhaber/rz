@@ -45,6 +45,7 @@ pub struct CompressOpts<'a> {
 pub struct DecompressOpts<'a> {
     pub force: bool,
     pub strip_components: u32,
+    pub includes: GlobSet,
     pub excludes: GlobSet,
     pub progress: &'a dyn ProgressReport,
 }
@@ -62,10 +63,11 @@ impl CompressOpts<'_> {
 
 impl DecompressOpts<'_> {
     /// Construct opts with no progress reporting (for tests / programmatic use).
-    pub fn new(force: bool, strip_components: u32, excludes: GlobSet) -> DecompressOpts<'static> {
+    pub fn new(force: bool, strip_components: u32, includes: GlobSet, excludes: GlobSet) -> DecompressOpts<'static> {
         DecompressOpts {
             force,
             strip_components,
+            includes,
             excludes,
             progress: &NoProgress,
         }
