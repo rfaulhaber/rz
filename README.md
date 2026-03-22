@@ -1,8 +1,8 @@
 # rz
 
-A multi-format archive tool written in Rust. Compress, decompress, list, and
-inspect tar, zip, and 7z archives through a single, consistent CLI — no more
-remembering whether it's `tar xzf`, `unzip`, or `7z x`.
+A multi-format archive tool written in Rust. Compress, decompress, test, list,
+and inspect tar, zip, and 7z archives through a single, consistent CLI — no
+more remembering whether it's `tar xzf`, `unzip`, or `7z x`.
 
 ## Supported formats
 
@@ -72,6 +72,9 @@ rz compress mydir -o archive -f tar-gz -l 9
 # Exclude patterns (glob, repeatable)
 rz compress mydir -o mydir.tar.gz --exclude '*.log' --exclude node_modules
 
+# Compress to stdout (tar-based formats; requires --format)
+rz compress mydir -o - -f tar-gz | ssh host 'rz d - -f tar-gz'
+
 # Short alias
 rz c mydir -o mydir.tar.zst
 ```
@@ -90,6 +93,16 @@ rz decompress mydir.tar.gz --strip-components 1
 
 # Exclude files during extraction
 rz decompress mydir.zip --exclude '*.test.js'
+
+# Extract only matching files (--include glob or positional paths)
+rz decompress project.tar.gz --include '*.rs'
+rz decompress release.tar.gz src/main.rs
+
+# Extract a file to stdout
+rz decompress release.tar.gz -O config.toml
+
+# Read archive from stdin (tar-based formats; requires --format)
+cat mydir.tar.gz | rz decompress - -f tar-gz -o /tmp/out
 
 # Overwrite existing files
 rz decompress mydir.tar.gz -F
@@ -114,6 +127,17 @@ rz list mydir.tar.gz --exclude '*.log'
 rz ls mydir.tar.gz
 ```
 
+### Test
+
+```sh
+# Verify archive integrity (fully decompress without writing to disk)
+rz test mydir.tar.gz
+# ok
+
+# Short alias
+rz t mydir.tar.gz
+```
+
 ### Info
 
 ```sh
@@ -127,11 +151,12 @@ rz info mydir.tar.gz
 
 ### Global options
 
-| Flag              | Description                     |
-|-------------------|---------------------------------|
-| `-p`, `--progress` | Show a progress bar            |
-| `-V`, `--version`  | Print version                  |
-| `-h`, `--help`     | Print help                     |
+| Flag               | Description                              |
+|--------------------|------------------------------------------|
+| `-p`, `--progress` | Show a progress bar                      |
+| `-v`, `--verbose`  | Print each entry name to stderr          |
+| `-V`, `--version`  | Print version                            |
+| `-h`, `--help`     | Print help                               |
 
 ## Feature flags
 
@@ -153,6 +178,8 @@ archive in memory before compressing) and bzip2 is unavailable.
   For large archives, consider enabling the `xz2` feature for streaming xz.
 - **7z format**: Does not support `--strip-components`. Extracts contents
   flat (does not preserve the top-level directory wrapper).
+- **Stdin/stdout streaming**: Only tar-based formats support `-` for
+  stdin/stdout. ZIP and 7z require seekable I/O and will error.
 - **Symlinks**: Followed during compression rather than stored as symlinks.
 
 ## License
