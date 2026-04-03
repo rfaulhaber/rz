@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use rz::cmd::{Cli, Command, Format};
+use rz::cmd::{Cli, Command, Format, SortField};
 use rz::error::{Error, Result};
 use rz::filter;
 use rz::format::{resolve_compress_format, resolve_input_format};
@@ -32,19 +32,79 @@ fn requires_seek(fmt: &Format) -> bool {
     matches!(fmt, Format::Zip | Format::SevenZ)
 }
 
+/// Format a byte count for display.  When `human` is true, uses IEC-style
+/// units (KiB, MiB, …); otherwise returns the raw number followed by "bytes".
+fn format_size(bytes: u64, human: bool) -> String {
+    if !human {
+        return format!("{bytes} bytes");
+    }
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    for &unit in UNITS {
+        if value < 1024.0 {
+            return if unit == "B" {
+                format!("{bytes} B")
+            } else {
+                format!("{value:.1} {unit}")
+            };
+        }
+        value /= 1024.0;
+    }
+    format!("{value:.1} PiB")
+}
+
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Compress {
-            input,
+            mut input,
             output,
             format,
             level,
             exclude,
+            exclude_from,
+            files_from,
+            exclude_vcs,
+            exclude_backups,
+            follow_symlinks,
+            totals,
+            dry_run,
         } => {
+            // Merge --files-from paths into input list.
+            if let Some(ref list_file) = files_from {
+                let extra = filter::read_paths_from_file(list_file)?;
+                input.extend(extra);
+            }
+
+            // Build combined exclude set.
+            let mut all_excludes = exclude;
+            for path in &exclude_from {
+                all_excludes.extend(filter::read_patterns_from_file(path)?);
+            }
+            if exclude_vcs {
+                for pat in &[".git", ".hg", ".svn", ".bzr", "_darcs", ".pijul", "CVS"] {
+                    all_excludes.push((*pat).to_owned());
+                }
+            }
+            if exclude_backups {
+                for pat in &["*~", "*.bak", "#*#", ".#*"] {
+                    all_excludes.push((*pat).to_owned());
+                }
+            }
+            let excludes = filter::build_exclude_set(&all_excludes)?;
+
+            // Dry-run: list what would be compressed and exit.
+            if dry_run {
+                let paths = filter::collect_compress_paths(&input, &excludes)?;
+                let mut stdout = std::io::stdout().lock();
+                for p in &paths {
+                    let _ = writeln!(stdout, "{p}");
+                }
+                return Ok(());
+            }
+
             let to_stdout = output.as_ref().is_some_and(|o| is_stdio(o.as_str()));
 
             let fmt = if to_stdout {
-                // Cannot infer format from "-", need explicit --format
                 format.ok_or(Error::CannotInferOutput)?
             } else {
                 resolve_compress_format(format, output.as_deref())?
@@ -56,9 +116,10 @@ fn run(cli: Cli) -> Result<()> {
                 ));
             }
 
-            // Disable progress bar when writing to stdout to avoid corrupting output.
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !to_stdout {
                 Box::new(BarProgress::spinner())
+            } else if totals {
+                Box::new(BarProgress::hidden())
             } else {
                 Box::new(NoProgress)
             };
@@ -71,7 +132,8 @@ fn run(cli: Cli) -> Result<()> {
             };
             let opts = CompressOpts {
                 level,
-                excludes: filter::build_exclude_set(&exclude)?,
+                excludes,
+                follow_symlinks,
                 progress,
             };
 
@@ -107,6 +169,10 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             progress.finish();
+            if totals {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "Total bytes: {}", format_size(progress.position(), false));
+            }
         }
 
         Command::Decompress {
@@ -114,10 +180,16 @@ fn run(cli: Cli) -> Result<()> {
             output,
             format,
             force,
+            no_overwrite,
+            keep_newer,
+            no_directory,
             to_stdout,
             strip_components,
             exclude,
+            exclude_from,
             include,
+            totals,
+            dry_run,
             paths,
         } => {
             let from_stdin = is_stdio(input.as_str());
@@ -134,11 +206,51 @@ fn run(cli: Cli) -> Result<()> {
                 ));
             }
 
+            // Build combined exclude set.
+            let mut all_excludes = exclude;
+            for path in &exclude_from {
+                all_excludes.extend(filter::read_patterns_from_file(path)?);
+            }
+            let excludes = filter::build_exclude_set(&all_excludes)?;
+            let includes = {
+                let mut all_includes = include;
+                all_includes.extend(paths);
+                filter::build_include_set(&all_includes)?
+            };
+
+            // Dry-run: list what would be extracted and exit.
+            if dry_run && !from_stdin {
+                let entries = match fmt {
+                    Format::Zip => zip::list(&input)?,
+                    Format::Tar => tar::list(&input)?,
+                    Format::TarGz => tar_gz::list(&input)?,
+                    Format::TarZst => tar_zst::list(&input)?,
+                    Format::TarXz => tar_xz::list(&input)?,
+                    #[cfg(feature = "bzip2")]
+                    Format::TarBz2 => tar_bz2::list(&input)?,
+                    Format::SevenZ => seven_z::list(&input)?,
+                    #[allow(unreachable_patterns)]
+                    other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                };
+                let mut stdout = std::io::stdout().lock();
+                for entry in &entries {
+                    if !filter::should_extract(entry.path.as_str(), &includes, &excludes) {
+                        continue;
+                    }
+                    if let Some(stripped) = filter::strip_components(&entry.path, strip_components) {
+                        let _ = writeln!(stdout, "{stripped}");
+                    }
+                }
+                return Ok(());
+            }
+
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !from_stdin {
                 let file_size = fs_err::metadata(&input)?.len();
                 Box::new(BarProgress::bytes(file_size))
             } else if cli.progress {
                 Box::new(BarProgress::spinner())
+            } else if totals {
+                Box::new(BarProgress::hidden())
             } else {
                 Box::new(NoProgress)
             };
@@ -151,13 +263,12 @@ fn run(cli: Cli) -> Result<()> {
             };
             let opts = DecompressOpts {
                 force,
+                no_overwrite,
+                keep_newer,
+                no_directory,
                 strip_components,
-                includes: {
-                    let mut all_includes = include;
-                    all_includes.extend(paths);
-                    filter::build_include_set(&all_includes)?
-                },
-                excludes: filter::build_exclude_set(&exclude)?,
+                includes,
+                excludes,
                 progress,
             };
 
@@ -218,6 +329,10 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             progress.finish();
+            if totals {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "Total bytes: {}", format_size(progress.position(), false));
+            }
         }
 
         Command::List {
@@ -225,9 +340,12 @@ fn run(cli: Cli) -> Result<()> {
             format,
             long,
             exclude,
+            exclude_from,
+            sort,
+            human_readable,
         } => {
             let fmt = resolve_input_format(format, &input)?;
-            let entries = match fmt {
+            let mut entries = match fmt {
                 Format::Zip => zip::list(&input)?,
                 Format::Tar => tar::list(&input)?,
                 Format::TarGz => tar_gz::list(&input)?,
@@ -242,7 +360,21 @@ fn run(cli: Cli) -> Result<()> {
                 )),
             };
 
-            let excludes = filter::build_exclude_set(&exclude)?;
+            // Build combined exclude set.
+            let mut all_excludes = exclude;
+            for path in &exclude_from {
+                all_excludes.extend(filter::read_patterns_from_file(path)?);
+            }
+            let excludes = filter::build_exclude_set(&all_excludes)?;
+
+            if let Some(ref field) = sort {
+                match field {
+                    SortField::Name => entries.sort_by(|a, b| a.path.cmp(&b.path)),
+                    SortField::Size => entries.sort_by(|a, b| a.size.cmp(&b.size)),
+                    SortField::Date => entries.sort_by(|a, b| a.mtime.cmp(&b.mtime)),
+                }
+            }
+
             let mut stdout = std::io::stdout().lock();
             for entry in &entries {
                 if !excludes.is_empty()
@@ -252,10 +384,11 @@ fn run(cli: Cli) -> Result<()> {
                 }
                 if long {
                     let kind = if entry.is_dir { "d" } else { "-" };
+                    let size_str = format_size(entry.size, human_readable);
                     let _ = writeln!(
                         stdout,
                         "{kind}{:06o}  {:>10}  {}",
-                        entry.mode, entry.size, entry.path,
+                        entry.mode, size_str, entry.path,
                     );
                 } else {
                     let _ = writeln!(stdout, "{}", entry.path);
@@ -293,11 +426,13 @@ fn run(cli: Cli) -> Result<()> {
                 )),
             }
             progress.finish();
-            let mut stderr = std::io::stderr().lock();
-            let _ = writeln!(stderr, "ok");
+            if !cli.quiet {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "ok");
+            }
         }
 
-        Command::Info { input, format } => {
+        Command::Info { input, format, human_readable } => {
             let fmt = resolve_input_format(format, &input)?;
             let info = match fmt {
                 Format::Zip => zip::info(&input)?,
@@ -317,8 +452,8 @@ fn run(cli: Cli) -> Result<()> {
             let mut stdout = std::io::stdout().lock();
             let _ = writeln!(stdout, "Format:       {}", info.format);
             let _ = writeln!(stdout, "Entries:      {}", info.entry_count);
-            let _ = writeln!(stdout, "Compressed:   {} bytes", info.compressed_size);
-            let _ = writeln!(stdout, "Uncompressed: {} bytes", info.total_uncompressed);
+            let _ = writeln!(stdout, "Compressed:   {}", format_size(info.compressed_size, human_readable));
+            let _ = writeln!(stdout, "Uncompressed: {}", format_size(info.total_uncompressed, human_readable));
         }
     }
 

@@ -25,13 +25,13 @@ pub fn compress(
         .compression_level(opts.level.map(i64::from));
 
     for input in inputs {
-        let meta = fs_err::symlink_metadata(input)?;
+        let meta = filter::input_metadata(input, opts.follow_symlinks)?;
         let name = input.file_name().unwrap_or(input.as_str());
         if opts.excludes.is_match(name) {
             continue;
         }
         if meta.is_dir() {
-            add_dir_recursive(&mut zip, input, name, options, &opts.excludes, opts.progress)?;
+            add_dir_recursive(&mut zip, input, name, options, &opts.excludes, opts.follow_symlinks, opts.progress)?;
         } else {
             zip.start_file(name, options)?;
             let data = fs_err::read(input)?;
@@ -54,6 +54,7 @@ fn add_dir_recursive(
     prefix: &str,
     options: SimpleFileOptions,
     excludes: &GlobSet,
+    follow_symlinks: bool,
     progress: &dyn ProgressReport,
 ) -> Result<()> {
     zip.add_directory(format!("{prefix}/"), options)?;
@@ -79,8 +80,14 @@ fn add_dir_recursive(
             continue;
         }
 
-        if entry.file_type()?.is_dir() {
-            add_dir_recursive(zip, child, &name, options, excludes, progress)?;
+        let is_dir = if follow_symlinks {
+            fs_err::metadata(child)?.is_dir()
+        } else {
+            entry.file_type()?.is_dir()
+        };
+
+        if is_dir {
+            add_dir_recursive(zip, child, &name, options, excludes, follow_symlinks, progress)?;
         } else {
             zip.start_file(&name, options)?;
             let data = fs_err::read(child)?;
@@ -108,12 +115,26 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             continue;
         }
 
+        // --no-directory: skip directory entries, flatten file paths.
+        if opts.no_directory && entry.is_dir() {
+            continue;
+        }
+
         let stripped = match filter::strip_components(&name, opts.strip_components) {
             Some(p) => p,
             None => continue,
         };
 
-        let out_path = output.join(&stripped);
+        let dest_path = if opts.no_directory {
+            match stripped.file_name() {
+                Some(name) => Utf8PathBuf::from(name),
+                None => continue,
+            }
+        } else {
+            stripped
+        };
+
+        let out_path = output.join(&dest_path);
 
         if entry.is_dir() {
             fs_err::create_dir_all(&out_path)?;
@@ -121,12 +142,24 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             if let Some(parent) = out_path.parent() {
                 fs_err::create_dir_all(parent)?;
             }
-            if !opts.force && fs_err::symlink_metadata(&out_path).is_ok() {
-                return Err(Error::FileExists(out_path));
+            if fs_err::symlink_metadata(&out_path).is_ok() {
+                if opts.keep_newer {
+                    let entry_mtime = entry
+                        .last_modified()
+                        .map(zip_datetime_to_epoch)
+                        .unwrap_or(0);
+                    if filter::is_existing_newer(&out_path, entry_mtime)? {
+                        continue;
+                    }
+                } else if opts.no_overwrite {
+                    continue;
+                } else if !opts.force {
+                    return Err(Error::FileExists(out_path));
+                }
             }
             let mut out_file = fs_err::File::create(&out_path)?;
             let written = io::copy(&mut entry, &mut out_file)?;
-            opts.progress.set_entry(stripped.as_str());
+            opts.progress.set_entry(dest_path.as_str());
             opts.progress.inc(written);
         }
     }
@@ -218,4 +251,41 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
         total_uncompressed,
         compressed_size,
     })
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Convert a zip `DateTime` to an approximate unix epoch (seconds since
+/// 1970-01-01).  Good enough for mtime comparison.
+fn zip_datetime_to_epoch(dt: zip::DateTime) -> u64 {
+    let year = dt.year() as u64;
+    let month = dt.month() as u64;
+    let day = dt.day() as u64;
+    let hour = dt.hour() as u64;
+    let minute = dt.minute() as u64;
+    let second = dt.second() as u64;
+
+    // Cumulative days before each month (non-leap year).
+    const MONTH_DAYS: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+
+    let years_since_epoch = year.saturating_sub(1970);
+    let leap_years = if year > 1970 {
+        let y = year - 1;
+        (y / 4 - y / 100 + y / 400) - (1969 / 4 - 1969 / 100 + 1969 / 400)
+    } else {
+        0
+    };
+    let mut days = years_since_epoch * 365 + leap_years;
+    if (1..=12).contains(&month) {
+        days += MONTH_DAYS[(month - 1) as usize];
+    }
+    days += day.saturating_sub(1);
+
+    // Add leap day if past February in a leap year.
+    let is_leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    if month > 2 && is_leap {
+        days += 1;
+    }
+
+    days * 86400 + hour * 3600 + minute * 60 + second
 }

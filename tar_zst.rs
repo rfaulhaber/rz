@@ -20,14 +20,15 @@ pub fn compress(
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
+        builder.follow_symlinks(opts.follow_symlinks);
         for input in inputs {
-            let meta = fs_err::symlink_metadata(input)?;
+            let meta = filter::input_metadata(input, opts.follow_symlinks)?;
             let name = input.file_name().unwrap_or(input.as_str());
             if opts.excludes.is_match(name) {
                 continue;
             }
             if meta.is_dir() {
-                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.progress)?;
+                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.follow_symlinks, opts.progress)?;
             } else {
                 let size = meta.len();
                 builder.append_path_with_name(input, name)?;
@@ -63,14 +64,15 @@ pub fn compress_to_writer<W: std::io::Write>(
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
+        builder.follow_symlinks(opts.follow_symlinks);
         for input in inputs {
-            let meta = fs_err::symlink_metadata(input)?;
+            let meta = filter::input_metadata(input, opts.follow_symlinks)?;
             let name = input.file_name().unwrap_or(input.as_str());
             if opts.excludes.is_match(name) {
                 continue;
             }
             if meta.is_dir() {
-                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.progress)?;
+                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.follow_symlinks, opts.progress)?;
             } else {
                 let size = meta.len();
                 builder.append_path_with_name(input, name)?;

@@ -1,3 +1,5 @@
+use std::io::BufRead;
+
 use camino::{Utf8Path, Utf8PathBuf};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
@@ -93,6 +95,17 @@ pub fn strip_components(path: &Utf8Path, n: u32) -> Option<Utf8PathBuf> {
     }
 }
 
+// ── Symlink helper ──────────────────────────────────────────────────────────
+
+/// Read file metadata, optionally following symlinks.
+pub fn input_metadata(path: &Utf8Path, follow_symlinks: bool) -> Result<std::fs::Metadata> {
+    if follow_symlinks {
+        Ok(fs_err::metadata(path)?)
+    } else {
+        Ok(fs_err::symlink_metadata(path)?)
+    }
+}
+
 // ── Stdout extraction ────────────────────────────────────────────────────────
 
 /// Extract matching tar entries to a writer (typically stdout), skipping
@@ -112,17 +125,26 @@ pub fn extract_tar_to_writer<R: std::io::Read, W: std::io::Write>(
             continue;
         }
 
-        let stripped = match strip_components(&orig_path, opts.strip_components) {
-            Some(p) => p,
-            None => continue,
-        };
-
         // Skip directory entries — only files have content.
         if entry.header().entry_type().is_dir() {
             continue;
         }
 
-        opts.progress.set_entry(stripped.as_str());
+        let stripped = match strip_components(&orig_path, opts.strip_components) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let display_name = if opts.no_directory {
+            match stripped.file_name() {
+                Some(name) => name.to_owned(),
+                None => continue,
+            }
+        } else {
+            stripped.to_string()
+        };
+
+        opts.progress.set_entry(&display_name);
         std::io::copy(&mut entry, writer)?;
     }
     Ok(())
@@ -155,6 +177,7 @@ pub fn append_dir_filtered<W: std::io::Write>(
     dir: &Utf8Path,
     prefix: &str,
     excludes: &GlobSet,
+    follow_symlinks: bool,
     progress: &dyn ProgressReport,
 ) -> Result<()> {
     builder.append_dir(prefix, dir)?;
@@ -180,8 +203,14 @@ pub fn append_dir_filtered<W: std::io::Write>(
             .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
         let utf8_path = Utf8Path::new(entry_str);
 
-        if entry.file_type()?.is_dir() {
-            append_dir_filtered(builder, utf8_path, &archive_name, excludes, progress)?;
+        let is_dir = if follow_symlinks {
+            fs_err::metadata(utf8_path)?.is_dir()
+        } else {
+            entry.file_type()?.is_dir()
+        };
+
+        if is_dir {
+            append_dir_filtered(builder, utf8_path, &archive_name, excludes, follow_symlinks, progress)?;
         } else {
             let meta = fs_err::metadata(utf8_path)?;
             builder.append_path_with_name(utf8_path, &archive_name)?;
@@ -210,12 +239,28 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             continue;
         }
 
+        let is_dir = entry.header().entry_type().is_dir();
+
+        // --no-directory: skip directory entries, flatten file paths.
+        if opts.no_directory && is_dir {
+            continue;
+        }
+
         let stripped = match strip_components(&orig_path, opts.strip_components) {
             Some(p) => p,
             None => continue,
         };
 
-        let dest = output.join(&stripped);
+        let dest_path = if opts.no_directory {
+            match stripped.file_name() {
+                Some(name) => Utf8PathBuf::from(name),
+                None => continue,
+            }
+        } else {
+            stripped
+        };
+
+        let dest = output.join(&dest_path);
 
         // Ensure parent directories exist.
         if let Some(parent) = dest.parent()
@@ -225,15 +270,130 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         }
 
         // Overwrite guard for non-directory entries.
-        if !opts.force
-            && !entry.header().entry_type().is_dir()
-            && fs_err::symlink_metadata(&dest).is_ok()
-        {
-            return Err(Error::FileExists(dest));
+        if !is_dir && fs_err::symlink_metadata(&dest).is_ok() {
+            if opts.keep_newer {
+                let entry_mtime = entry.header().mtime().unwrap_or(0);
+                if is_existing_newer(&dest, entry_mtime)? {
+                    continue;
+                }
+            } else if opts.no_overwrite {
+                continue;
+            } else if !opts.force {
+                return Err(Error::FileExists(dest));
+            }
         }
 
-        opts.progress.set_entry(stripped.as_str());
+        opts.progress.set_entry(dest_path.as_str());
         entry.unpack(&dest)?;
+    }
+    Ok(())
+}
+
+/// Returns `true` when the file at `path` has an mtime >= the given unix
+/// timestamp, meaning the existing file is at least as new as the entry.
+pub fn is_existing_newer(path: &Utf8Path, entry_mtime: u64) -> Result<bool> {
+    let meta = fs_err::metadata(path)?;
+    let file_mtime = meta
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Ok(file_mtime >= entry_mtime)
+}
+
+// ── Pattern / path file readers ─────────────────────────────────────────────
+
+/// Read glob patterns from a file, one per line.
+/// Blank lines and lines starting with `#` are ignored.
+pub fn read_patterns_from_file(path: &Utf8Path) -> Result<Vec<String>> {
+    let file = fs_err::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut patterns = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        patterns.push(trimmed.to_owned());
+    }
+    Ok(patterns)
+}
+
+/// Read file paths from a file, one per line.
+/// Blank lines and lines starting with `#` are ignored.
+pub fn read_paths_from_file(path: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
+    let file = fs_err::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut paths = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        paths.push(Utf8PathBuf::from(trimmed));
+    }
+    Ok(paths)
+}
+
+// ── Dry-run helpers ─────────────────────────────────────────────────────────
+
+/// Collect all file paths that would be added to an archive from the given
+/// inputs, honouring exclude patterns.  Used by `--dry-run` on compress.
+pub fn collect_compress_paths(
+    inputs: &[Utf8PathBuf],
+    excludes: &GlobSet,
+) -> Result<Vec<String>> {
+    let mut paths = Vec::new();
+    for input in inputs {
+        let meta = fs_err::symlink_metadata(input)?;
+        let name = input.file_name().unwrap_or(input.as_str());
+        if excludes.is_match(name) {
+            continue;
+        }
+        if meta.is_dir() {
+            collect_dir_paths(input, name, excludes, &mut paths)?;
+        } else {
+            paths.push(name.to_owned());
+        }
+    }
+    Ok(paths)
+}
+
+fn collect_dir_paths(
+    dir: &Utf8Path,
+    prefix: &str,
+    excludes: &GlobSet,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    out.push(format!("{prefix}/"));
+    let mut entries: Vec<_> =
+        fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let entry_path = entry.path();
+        let file_name = entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
+        let archive_name = format!("{prefix}/{file_name}");
+
+        if excludes.is_match(&archive_name) {
+            continue;
+        }
+
+        let entry_str = entry_path
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
+        let utf8_path = Utf8Path::new(entry_str);
+
+        if entry.file_type()?.is_dir() {
+            collect_dir_paths(utf8_path, &archive_name, excludes, out)?;
+        } else {
+            out.push(archive_name);
+        }
     }
     Ok(())
 }

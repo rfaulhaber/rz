@@ -14,6 +14,9 @@ pub trait ProgressReport {
     /// Report that `n` additional bytes have been processed.
     fn inc(&self, n: u64);
 
+    /// Return the accumulated byte count so far.
+    fn position(&self) -> u64;
+
     /// Report that a named entry is being processed (shown as the bar message).
     fn set_entry(&self, name: &str);
 
@@ -29,6 +32,7 @@ pub struct NoProgress;
 impl ProgressReport for NoProgress {
     fn set_length(&self, _len: u64) {}
     fn inc(&self, _n: u64) {}
+    fn position(&self) -> u64 { 0 }
     fn set_entry(&self, _name: &str) {}
     fn finish(&self) {}
 }
@@ -65,6 +69,14 @@ impl BarProgress {
     }
 }
 
+impl BarProgress {
+    /// Create a hidden progress bar that tracks bytes but renders nothing.
+    /// Useful for `--totals` without `--progress`.
+    pub fn hidden() -> Self {
+        Self { bar: ProgressBar::hidden() }
+    }
+}
+
 impl ProgressReport for BarProgress {
     fn set_length(&self, len: u64) {
         self.bar.set_length(len);
@@ -72,6 +84,10 @@ impl ProgressReport for BarProgress {
 
     fn inc(&self, n: u64) {
         self.bar.inc(n);
+    }
+
+    fn position(&self) -> u64 {
+        self.bar.position()
     }
 
     fn set_entry(&self, name: &str) {
@@ -104,6 +120,10 @@ impl ProgressReport for VerboseReport<'_> {
 
     fn inc(&self, n: u64) {
         self.inner.inc(n);
+    }
+
+    fn position(&self) -> u64 {
+        self.inner.position()
     }
 
     fn set_entry(&self, name: &str) {

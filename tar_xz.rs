@@ -22,9 +22,10 @@ pub fn compress(
     let buf = BufWriter::new(file);
     let encoder = xz2::write::XzEncoder::new(buf, level);
     let mut builder = tar::Builder::new(encoder);
+    builder.follow_symlinks(opts.follow_symlinks);
 
     for input in inputs {
-        append_input(&mut builder, input, &opts.excludes, opts.progress)?;
+        append_input(&mut builder, input, &opts.excludes, opts.follow_symlinks, opts.progress)?;
     }
 
     let encoder = builder.into_inner()?;
@@ -45,8 +46,9 @@ pub fn compress(
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
+        builder.follow_symlinks(opts.follow_symlinks);
         for input in inputs {
-            append_input(&mut builder, input, &opts.excludes, opts.progress)?;
+            append_input(&mut builder, input, &opts.excludes, opts.follow_symlinks, opts.progress)?;
         }
         builder.into_inner()?;
     }
@@ -64,15 +66,16 @@ fn append_input<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     input: &Utf8Path,
     excludes: &globset::GlobSet,
+    follow_symlinks: bool,
     progress: &dyn ProgressReport,
 ) -> Result<()> {
-    let meta = fs_err::symlink_metadata(input)?;
+    let meta = filter::input_metadata(input, follow_symlinks)?;
     let name = input.file_name().unwrap_or(input.as_str());
     if excludes.is_match(name) {
         return Ok(());
     }
     if meta.is_dir() {
-        filter::append_dir_filtered(builder, input, name, excludes, progress)?;
+        filter::append_dir_filtered(builder, input, name, excludes, follow_symlinks, progress)?;
     } else {
         let size = meta.len();
         builder.append_path_with_name(input, name)?;
@@ -94,9 +97,10 @@ pub fn compress_to_writer<W: std::io::Write>(
     let buf = BufWriter::new(writer);
     let encoder = xz2::write::XzEncoder::new(buf, level);
     let mut builder = tar::Builder::new(encoder);
+    builder.follow_symlinks(opts.follow_symlinks);
 
     for input in inputs {
-        append_input(&mut builder, input, &opts.excludes, opts.progress)?;
+        append_input(&mut builder, input, &opts.excludes, opts.follow_symlinks, opts.progress)?;
     }
 
     let encoder = builder.into_inner()?;
@@ -113,8 +117,9 @@ pub fn compress_to_writer<W: std::io::Write>(
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
+        builder.follow_symlinks(opts.follow_symlinks);
         for input in inputs {
-            append_input(&mut builder, input, &opts.excludes, opts.progress)?;
+            append_input(&mut builder, input, &opts.excludes, opts.follow_symlinks, opts.progress)?;
         }
         builder.into_inner()?;
     }

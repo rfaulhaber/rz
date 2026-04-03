@@ -38,12 +38,16 @@ pub struct ArchiveInfo {
 pub struct CompressOpts<'a> {
     pub level: Option<u32>,
     pub excludes: GlobSet,
+    pub follow_symlinks: bool,
     pub progress: &'a dyn ProgressReport,
 }
 
 /// Options for decompress operations.
 pub struct DecompressOpts<'a> {
     pub force: bool,
+    pub no_overwrite: bool,
+    pub keep_newer: bool,
+    pub no_directory: bool,
     pub strip_components: u32,
     pub includes: GlobSet,
     pub excludes: GlobSet,
@@ -56,6 +60,7 @@ impl CompressOpts<'_> {
         CompressOpts {
             level,
             excludes,
+            follow_symlinks: false,
             progress: &NoProgress,
         }
     }
@@ -66,6 +71,9 @@ impl DecompressOpts<'_> {
     pub fn new(force: bool, strip_components: u32, includes: GlobSet, excludes: GlobSet) -> DecompressOpts<'static> {
         DecompressOpts {
             force,
+            no_overwrite: false,
+            keep_newer: false,
+            no_directory: false,
             strip_components,
             includes,
             excludes,

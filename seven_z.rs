@@ -26,15 +26,50 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     if opts.strip_components > 0 {
         return Err(Error::StripComponentsUnsupported("7z".to_owned()));
     }
-    if opts.includes.is_empty() && opts.excludes.is_empty() {
-        sevenz_rust2::decompress_file(input, output)?;
-    } else {
+    let use_extract_fn = !opts.includes.is_empty()
+        || !opts.excludes.is_empty()
+        || opts.no_overwrite
+        || opts.keep_newer
+        || opts.no_directory;
+    if use_extract_fn {
         sevenz_rust2::decompress_file_with_extract_fn(input, output, |entry, reader, dest| {
             if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
                 return Ok(true);
             }
-            sevenz_rust2::default_entry_extract_fn(entry, reader, dest)
+            if opts.no_directory && entry.is_directory {
+                return Ok(true);
+            }
+            let out_name = if opts.no_directory {
+                Utf8Path::new(&entry.name)
+                    .file_name()
+                    .map(String::from)
+                    .unwrap_or_else(|| entry.name.clone())
+            } else {
+                entry.name.clone()
+            };
+            let out_path = dest.join(&out_name);
+            if !entry.is_directory && out_path.exists() {
+                if opts.keep_newer {
+                    // 7z entries don't reliably expose mtime; skip if file exists.
+                    return Ok(true);
+                }
+                if opts.no_overwrite {
+                    return Ok(true);
+                }
+            }
+            if opts.no_directory {
+                // Extract to flat dest with the basename only.
+                let mut out_file = fs_err::File::create(&out_path)
+                    .map_err(|e| sevenz_rust2::Error::Io(e, out_name.into()))?;
+                std::io::copy(reader, &mut out_file)
+                    .map_err(|e| sevenz_rust2::Error::Io(e, "copy".into()))?;
+                Ok(true)
+            } else {
+                sevenz_rust2::default_entry_extract_fn(entry, reader, dest)
+            }
         })?;
+    } else {
+        sevenz_rust2::decompress_file(input, output)?;
     }
     Ok(())
 }
