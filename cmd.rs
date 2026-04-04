@@ -69,6 +69,14 @@ pub enum Command {
         #[arg(long)]
         totals: bool,
 
+        /// Respect .gitignore rules when compressing
+        #[arg(long)]
+        exclude_vcs_ignores: bool,
+
+        /// Do not recurse into directories
+        #[arg(long)]
+        no_recursion: bool,
+
         /// Show what would be compressed without creating an archive
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -127,6 +135,18 @@ pub enum Command {
         /// Print total bytes processed at the end
         #[arg(long)]
         totals: bool,
+
+        /// Rename existing files instead of overwriting (appends .bak by default)
+        #[arg(long, conflicts_with_all = ["force", "no_overwrite", "keep_newer"])]
+        backup: bool,
+
+        /// Suffix for backup files (implies --backup, default: .bak)
+        #[arg(long, conflicts_with_all = ["force", "no_overwrite", "keep_newer"])]
+        suffix: Option<String>,
+
+        /// Restore original file permissions from archive metadata
+        #[arg(short = 'P', long)]
+        preserve_permissions: bool,
 
         /// Show what would be extracted without writing to disk
         #[arg(short = 'n', long)]

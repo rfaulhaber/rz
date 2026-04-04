@@ -1,22 +1,17 @@
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use globset::GlobSet;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::{Error, Result};
 use crate::filter;
-use crate::progress::ProgressReport;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
-pub fn compress(
-    inputs: &[Utf8PathBuf],
-    output: &Utf8Path,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
+pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let file = fs_err::File::create(output)?;
     let mut zip = ZipWriter::new(file);
 
@@ -31,7 +26,13 @@ pub fn compress(
             continue;
         }
         if meta.is_dir() {
-            add_dir_recursive(&mut zip, input, name, options, &opts.excludes, opts.follow_symlinks, opts.progress)?;
+            if opts.no_recursion {
+                zip.add_directory(format!("{name}/"), options)?;
+            } else if opts.exclude_vcs_ignores {
+                add_dir_vcs(&mut zip, input, name, options, opts)?;
+            } else {
+                add_dir_recursive(&mut zip, input, name, options, opts)?;
+            }
         } else {
             zip.start_file(name, options)?;
             let data = fs_err::read(input)?;
@@ -53,15 +54,13 @@ fn add_dir_recursive(
     dir: &Utf8Path,
     prefix: &str,
     options: SimpleFileOptions,
-    excludes: &GlobSet,
-    follow_symlinks: bool,
-    progress: &dyn ProgressReport,
+    opts: &CompressOpts<'_>,
 ) -> Result<()> {
     zip.add_directory(format!("{prefix}/"), options)?;
 
     // Sort entries for deterministic archive output.
-    let mut dir_entries: Vec<_> = fs_err::read_dir(dir)?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut dir_entries: Vec<_> =
+        fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
     dir_entries.sort_by_key(|e| e.file_name());
 
     for entry in dir_entries {
@@ -76,25 +75,77 @@ fn add_dir_recursive(
         let child = Utf8Path::new(entry_str);
         let name = format!("{prefix}/{file_name}");
 
-        if excludes.is_match(&name) {
+        if opts.excludes.is_match(&name) {
             continue;
         }
 
-        let is_dir = if follow_symlinks {
+        let is_dir = if opts.follow_symlinks {
             fs_err::metadata(child)?.is_dir()
         } else {
             entry.file_type()?.is_dir()
         };
 
         if is_dir {
-            add_dir_recursive(zip, child, &name, options, excludes, follow_symlinks, progress)?;
+            add_dir_recursive(zip, child, &name, options, opts)?;
         } else {
             zip.start_file(&name, options)?;
             let data = fs_err::read(child)?;
             let size = data.len() as u64;
             io::Write::write_all(zip, &data)?;
-            progress.set_entry(&name);
-            progress.inc(size);
+            opts.progress.set_entry(&name);
+            opts.progress.inc(size);
+        }
+    }
+    Ok(())
+}
+
+/// Add a directory to a zip archive using the `ignore` crate to respect
+/// `.gitignore` rules.
+fn add_dir_vcs(
+    zip: &mut ZipWriter<fs_err::File>,
+    dir: &Utf8Path,
+    prefix: &str,
+    options: SimpleFileOptions,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    for result in filter::vcs_walker(dir, opts.follow_symlinks) {
+        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        let fs_path = entry.path();
+
+        let relative = fs_path
+            .strip_prefix(dir.as_std_path())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        if relative.as_os_str().is_empty() {
+            zip.add_directory(format!("{prefix}/"), options)?;
+            continue;
+        }
+
+        let rel_str = relative
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(relative.display().to_string()))?;
+        let archive_name = format!("{prefix}/{rel_str}");
+
+        if opts.excludes.is_match(&archive_name) {
+            continue;
+        }
+
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+
+        if is_dir {
+            zip.add_directory(format!("{archive_name}/"), options)?;
+        } else {
+            let utf8_path = Utf8Path::new(
+                fs_path
+                    .to_str()
+                    .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
+            );
+            zip.start_file(&archive_name, options)?;
+            let data = fs_err::read(utf8_path)?;
+            let size = data.len() as u64;
+            io::Write::write_all(zip, &data)?;
+            opts.progress.set_entry(&archive_name);
+            opts.progress.inc(size);
         }
     }
     Ok(())
@@ -103,72 +154,97 @@ fn add_dir_recursive(
 // ── Decompress ────────────────────────────────────────────────────────────────
 
 pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
-    let file = fs_err::File::open(input)?;
-    let mut archive = ZipArchive::new(file)?;
+    let len = {
+        let file = fs_err::File::open(input)?;
+        ZipArchive::new(file)?.len()
+    };
 
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let name = Utf8PathBuf::from(entry.name());
+    (0..len).into_par_iter().try_for_each_init(
+        || -> Option<ZipArchive<fs_err::File>> {
+            let file = fs_err::File::open(input).ok()?;
+            ZipArchive::new(file).ok()
+        },
+        |maybe_archive, i| -> Result<()> {
+            let archive = maybe_archive.as_mut().ok_or_else(|| {
+                Error::Io(io::Error::other("failed to open zip archive"))
+            })?;
+            let mut entry = archive.by_index(i)?;
+            let name = Utf8PathBuf::from(entry.name());
 
-        // Include/exclude check against the original (pre-strip) path.
-        if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
-            continue;
-        }
-
-        // --no-directory: skip directory entries, flatten file paths.
-        if opts.no_directory && entry.is_dir() {
-            continue;
-        }
-
-        let stripped = match filter::strip_components(&name, opts.strip_components) {
-            Some(p) => p,
-            None => continue,
-        };
-
-        let dest_path = if opts.no_directory {
-            match stripped.file_name() {
-                Some(name) => Utf8PathBuf::from(name),
-                None => continue,
+            if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
+                return Ok(());
             }
-        } else {
-            stripped
-        };
 
-        let out_path = output.join(&dest_path);
-
-        if entry.is_dir() {
-            fs_err::create_dir_all(&out_path)?;
-        } else {
-            if let Some(parent) = out_path.parent() {
-                fs_err::create_dir_all(parent)?;
+            if opts.no_directory && entry.is_dir() {
+                return Ok(());
             }
-            if fs_err::symlink_metadata(&out_path).is_ok() {
-                if opts.keep_newer {
-                    let entry_mtime = entry
-                        .last_modified()
-                        .map(zip_datetime_to_epoch)
-                        .unwrap_or(0);
-                    if filter::is_existing_newer(&out_path, entry_mtime)? {
-                        continue;
-                    }
-                } else if opts.no_overwrite {
-                    continue;
-                } else if !opts.force {
-                    return Err(Error::FileExists(out_path));
+
+            let stripped = match filter::strip_components(&name, opts.strip_components) {
+                Some(p) => p,
+                None => return Ok(()),
+            };
+
+            let dest_path = if opts.no_directory {
+                match stripped.file_name() {
+                    Some(name) => Utf8PathBuf::from(name),
+                    None => return Ok(()),
                 }
+            } else {
+                stripped
+            };
+
+            let out_path = output.join(&dest_path);
+
+            if entry.is_dir() {
+                fs_err::create_dir_all(&out_path)?;
+            } else {
+                if let Some(parent) = out_path.parent() {
+                    fs_err::create_dir_all(parent)?;
+                }
+                if fs_err::symlink_metadata(&out_path).is_ok() {
+                    if let Some(ref suffix) = opts.backup_suffix {
+                        let backup = Utf8PathBuf::from(format!("{out_path}{suffix}"));
+                        fs_err::rename(&out_path, &backup)?;
+                    } else if opts.keep_newer {
+                        let entry_mtime = entry
+                            .last_modified()
+                            .map(zip_datetime_to_epoch)
+                            .unwrap_or(0);
+                        if filter::is_existing_newer(&out_path, entry_mtime)? {
+                            return Ok(());
+                        }
+                    } else if opts.no_overwrite {
+                        return Ok(());
+                    } else if !opts.force {
+                        return Err(Error::FileExists(out_path));
+                    }
+                }
+                let unix_mode = entry.unix_mode();
+                let mut out_file = fs_err::File::create(&out_path)?;
+                let written = io::copy(&mut entry, &mut out_file)?;
+                #[cfg(unix)]
+                if opts.preserve_permissions
+                    && let Some(mode) = unix_mode
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs_err::set_permissions(&out_path, std::fs::Permissions::from_mode(mode))?;
+                }
+                opts.progress.set_entry(dest_path.as_str());
+                opts.progress.inc(written);
             }
-            let mut out_file = fs_err::File::create(&out_path)?;
-            let written = io::copy(&mut entry, &mut out_file)?;
-            opts.progress.set_entry(dest_path.as_str());
-            opts.progress.inc(written);
-        }
-    }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
 // ── Decompress to writer ─────────────────────────────────────────────────────
 
-pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_to_writer<W: std::io::Write>(
+    input: &Utf8Path,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let mut archive = ZipArchive::new(file)?;
 
@@ -198,16 +274,28 @@ pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W,
 // ── Test ──────────────────────────────────────────────────────────────────────
 
 pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
-    let file = fs_err::File::open(input)?;
-    let mut archive = ZipArchive::new(file)?;
+    let len = {
+        let file = fs_err::File::open(input)?;
+        ZipArchive::new(file)?.len()
+    };
 
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_owned();
-        progress.set_entry(&name);
-        let written = io::copy(&mut entry, &mut io::sink())?;
-        progress.inc(written);
-    }
+    (0..len).into_par_iter().try_for_each_init(
+        || -> Option<ZipArchive<fs_err::File>> {
+            let file = fs_err::File::open(input).ok()?;
+            ZipArchive::new(file).ok()
+        },
+        |maybe_archive, i| -> Result<()> {
+            let archive = maybe_archive.as_mut().ok_or_else(|| {
+                Error::Io(io::Error::other("failed to open zip archive"))
+            })?;
+            let mut entry = archive.by_index(i)?;
+            let name = entry.name().to_owned();
+            progress.set_entry(&name);
+            let written = io::copy(&mut entry, &mut io::sink())?;
+            progress.inc(written);
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -217,7 +305,7 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let file = fs_err::File::open(input)?;
     let mut archive = ZipArchive::new(file)?;
 
-    let mut entries = Vec::new();
+    let mut entries = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let entry = archive.by_index_raw(i)?;
         entries.push(Entry {
@@ -238,16 +326,26 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 
     let file = fs_err::File::open(input)?;
     let mut archive = ZipArchive::new(file)?;
+    let entry_count = archive.len();
 
-    let mut total_uncompressed: u64 = 0;
-    for i in 0..archive.len() {
-        let entry = archive.by_index_raw(i)?;
-        total_uncompressed += entry.size();
-    }
+    // Fast path: decompressed_size() reads from the already-parsed central
+    // directory with zero per-entry I/O.  Falls back to by_index_raw() only
+    // when the archive uses data descriptors (uncommon).
+    let total_uncompressed = match archive.decompressed_size() {
+        Some(size) => size as u64,
+        None => {
+            let mut total: u64 = 0;
+            for i in 0..entry_count {
+                let entry = archive.by_index_raw(i)?;
+                total += entry.size();
+            }
+            total
+        }
+    };
 
     Ok(ArchiveInfo {
         format: "zip",
-        entry_count: archive.len(),
+        entry_count,
         total_uncompressed,
         compressed_size,
     })

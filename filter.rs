@@ -5,7 +5,7 @@ use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 
 use crate::error::{Error, Result};
 use crate::progress::ProgressReport;
-use crate::DecompressOpts;
+use crate::{CompressOpts, DecompressOpts};
 
 /// Returns `true` when an entry at `path` should be extracted, considering
 /// both include and exclude filters.  When includes are non-empty, the path
@@ -95,6 +95,23 @@ pub fn strip_components(path: &Utf8Path, n: u32) -> Option<Utf8PathBuf> {
     }
 }
 
+// ── VCS-aware walking ───────────────────────────────────────────────────────
+
+/// Build an `ignore::Walk` iterator that respects `.gitignore` rules.
+///
+/// This is the single source of truth for VCS-aware walking configuration.
+/// Used by tar compress, zip compress, 7z compress, and dry-run collection.
+pub fn vcs_walker(dir: &Utf8Path, follow_symlinks: bool) -> ignore::Walk {
+    ignore::WalkBuilder::new(dir.as_std_path())
+        .standard_filters(false)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .follow_links(follow_symlinks)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .build()
+}
+
 // ── Symlink helper ──────────────────────────────────────────────────────────
 
 /// Read file metadata, optionally following symlinks.
@@ -172,7 +189,30 @@ pub fn verify_tar_entries<R: std::io::Read>(
 
 /// Walk a directory tree and append entries to a tar builder, skipping paths
 /// that match the exclude set.  Reports progress per file via `progress`.
+///
+/// When `opts.exclude_vcs_ignores` is set, uses the `ignore` crate's
+/// `WalkBuilder` to respect `.gitignore` rules.  When `opts.no_recursion` is
+/// set, only the directory entry itself is added (no contents).
 pub fn append_dir_filtered<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    dir: &Utf8Path,
+    prefix: &str,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    if opts.no_recursion {
+        builder.append_dir(prefix, dir)?;
+        return Ok(());
+    }
+
+    if opts.exclude_vcs_ignores {
+        return append_dir_vcs(builder, dir, prefix, opts);
+    }
+
+    append_dir_simple(builder, dir, prefix, &opts.excludes, opts.follow_symlinks, opts.progress)
+}
+
+/// Standard directory walk (no VCS-ignore awareness).
+fn append_dir_simple<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     dir: &Utf8Path,
     prefix: &str,
@@ -210,7 +250,7 @@ pub fn append_dir_filtered<W: std::io::Write>(
         };
 
         if is_dir {
-            append_dir_filtered(builder, utf8_path, &archive_name, excludes, follow_symlinks, progress)?;
+            append_dir_simple(builder, utf8_path, &archive_name, excludes, follow_symlinks, progress)?;
         } else {
             let meta = fs_err::metadata(utf8_path)?;
             builder.append_path_with_name(utf8_path, &archive_name)?;
@@ -221,6 +261,120 @@ pub fn append_dir_filtered<W: std::io::Write>(
     Ok(())
 }
 
+/// Walk a directory using the `ignore` crate to respect `.gitignore` rules,
+/// and append matching entries to a tar builder.
+fn append_dir_vcs<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    dir: &Utf8Path,
+    prefix: &str,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    for result in vcs_walker(dir, opts.follow_symlinks) {
+        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        let fs_path = entry.path();
+
+        let relative = fs_path
+            .strip_prefix(dir.as_std_path())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        // Root directory entry.
+        if relative.as_os_str().is_empty() {
+            builder.append_dir(prefix, dir)?;
+            continue;
+        }
+
+        let rel_str = relative
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(relative.display().to_string()))?;
+        let archive_name = format!("{prefix}/{rel_str}");
+
+        if opts.excludes.is_match(&archive_name) {
+            continue;
+        }
+
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+
+        if is_dir {
+            builder.append_dir(&archive_name, fs_path)?;
+        } else {
+            let utf8_path = Utf8Path::new(
+                fs_path
+                    .to_str()
+                    .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
+            );
+            let meta = fs_err::metadata(utf8_path)?;
+            builder.append_path_with_name(utf8_path, &archive_name)?;
+            opts.progress.set_entry(&archive_name);
+            opts.progress.inc(meta.len());
+        }
+    }
+    Ok(())
+}
+
+/// Append each input (file or directory) to a tar builder, respecting
+/// excludes.  This is the shared input-iteration loop used by every
+/// tar-based compress function.
+pub fn append_inputs<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    inputs: &[Utf8PathBuf],
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    for input in inputs {
+        let meta = input_metadata(input, opts.follow_symlinks)?;
+        let name = input.file_name().unwrap_or(input.as_str());
+        if opts.excludes.is_match(name) {
+            continue;
+        }
+        if meta.is_dir() {
+            append_dir_filtered(builder, input, name, opts)?;
+        } else {
+            let size = meta.len();
+            builder.append_path_with_name(input, name)?;
+            opts.progress.set_entry(name);
+            opts.progress.inc(size);
+        }
+    }
+    Ok(())
+}
+
+/// Collect entry metadata from a tar archive into a `Vec<Entry>`.
+/// Shared by every tar-based `list` function.
+pub fn list_tar_entries<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+) -> Result<Vec<crate::Entry>> {
+    let mut entries = Vec::new();
+    for entry in archive.entries()? {
+        let entry = entry?;
+        let header = entry.header();
+        let path = entry.path()?;
+        let path = Utf8PathBuf::try_from(path.into_owned())
+            .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+        entries.push(crate::Entry {
+            path,
+            size: header.size()?,
+            mtime: header.mtime()?,
+            mode: header.mode()?,
+            is_dir: header.entry_type().is_dir(),
+        });
+    }
+    Ok(entries)
+}
+
+/// Count entries and sum uncompressed sizes in a tar archive.
+/// Shared by every tar-based `info` function.
+pub fn count_tar_entries<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+) -> Result<(usize, u64)> {
+    let mut entry_count: usize = 0;
+    let mut total_uncompressed: u64 = 0;
+    for entry in archive.entries()? {
+        let entry = entry?;
+        total_uncompressed += entry.header().size()?;
+        entry_count += 1;
+    }
+    Ok((entry_count, total_uncompressed))
+}
+
 /// Extract entries from a tar archive, honouring exclude patterns and
 /// path-component stripping.  Reports progress per entry.
 pub fn unpack_tar_filtered<R: std::io::Read>(
@@ -228,6 +382,8 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
     output: &Utf8Path,
     opts: &DecompressOpts<'_>,
 ) -> Result<()> {
+    archive.set_preserve_permissions(opts.preserve_permissions);
+
     for entry in archive.entries()? {
         let mut entry = entry?;
         let orig_path = entry.path()?;
@@ -271,7 +427,10 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
 
         // Overwrite guard for non-directory entries.
         if !is_dir && fs_err::symlink_metadata(&dest).is_ok() {
-            if opts.keep_newer {
+            if let Some(ref suffix) = opts.backup_suffix {
+                let backup = Utf8PathBuf::from(format!("{dest}{suffix}"));
+                fs_err::rename(&dest, &backup)?;
+            } else if opts.keep_newer {
                 let entry_mtime = entry.header().mtime().unwrap_or(0);
                 if is_existing_newer(&dest, entry_mtime)? {
                     continue;
@@ -301,40 +460,55 @@ pub fn is_existing_newer(path: &Utf8Path, entry_mtime: u64) -> Result<bool> {
     Ok(file_mtime >= entry_mtime)
 }
 
+// ── Exclude-set building ────────────────────────────────────────────────────
+
+/// Merge inline exclude patterns with patterns read from `--exclude-from`
+/// files, then build a [`GlobSet`].
+///
+/// Used by Compress, Decompress, and List commands.
+pub fn build_excludes(
+    patterns: Vec<String>,
+    pattern_files: &[Utf8PathBuf],
+) -> Result<GlobSet> {
+    let mut all = patterns;
+    for path in pattern_files {
+        all.extend(read_patterns_from_file(path)?);
+    }
+    build_exclude_set(&all)
+}
+
 // ── Pattern / path file readers ─────────────────────────────────────────────
 
-/// Read glob patterns from a file, one per line.
+/// Read non-empty, non-comment lines from a file (one per line).
 /// Blank lines and lines starting with `#` are ignored.
-pub fn read_patterns_from_file(path: &Utf8Path) -> Result<Vec<String>> {
+fn read_lines_from_file(path: &Utf8Path) -> Result<Vec<String>> {
     let file = fs_err::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    let mut patterns = Vec::new();
+    let mut lines = Vec::new();
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        patterns.push(trimmed.to_owned());
+        lines.push(trimmed.to_owned());
     }
-    Ok(patterns)
+    Ok(lines)
+}
+
+/// Read glob patterns from a file, one per line.
+/// Blank lines and lines starting with `#` are ignored.
+pub fn read_patterns_from_file(path: &Utf8Path) -> Result<Vec<String>> {
+    read_lines_from_file(path)
 }
 
 /// Read file paths from a file, one per line.
 /// Blank lines and lines starting with `#` are ignored.
 pub fn read_paths_from_file(path: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
-    let file = fs_err::File::open(path)?;
-    let reader = std::io::BufReader::new(file);
-    let mut paths = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        paths.push(Utf8PathBuf::from(trimmed));
-    }
-    Ok(paths)
+    Ok(read_lines_from_file(path)?
+        .into_iter()
+        .map(Utf8PathBuf::from)
+        .collect())
 }
 
 // ── Dry-run helpers ─────────────────────────────────────────────────────────
@@ -343,17 +517,23 @@ pub fn read_paths_from_file(path: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
 /// inputs, honouring exclude patterns.  Used by `--dry-run` on compress.
 pub fn collect_compress_paths(
     inputs: &[Utf8PathBuf],
-    excludes: &GlobSet,
+    opts: &CompressOpts<'_>,
 ) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     for input in inputs {
         let meta = fs_err::symlink_metadata(input)?;
         let name = input.file_name().unwrap_or(input.as_str());
-        if excludes.is_match(name) {
+        if opts.excludes.is_match(name) {
             continue;
         }
         if meta.is_dir() {
-            collect_dir_paths(input, name, excludes, &mut paths)?;
+            if opts.no_recursion {
+                paths.push(format!("{name}/"));
+            } else if opts.exclude_vcs_ignores {
+                collect_dir_paths_vcs(input, name, &opts.excludes, opts.follow_symlinks, &mut paths)?;
+            } else {
+                collect_dir_paths(input, name, &opts.excludes, &mut paths)?;
+            }
         } else {
             paths.push(name.to_owned());
         }
@@ -391,6 +571,46 @@ fn collect_dir_paths(
 
         if entry.file_type()?.is_dir() {
             collect_dir_paths(utf8_path, &archive_name, excludes, out)?;
+        } else {
+            out.push(archive_name);
+        }
+    }
+    Ok(())
+}
+
+/// Collect paths using the `ignore` crate to respect `.gitignore` rules.
+fn collect_dir_paths_vcs(
+    dir: &Utf8Path,
+    prefix: &str,
+    excludes: &GlobSet,
+    follow_symlinks: bool,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    for result in vcs_walker(dir, follow_symlinks) {
+        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        let fs_path = entry.path();
+
+        let relative = fs_path
+            .strip_prefix(dir.as_std_path())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        if relative.as_os_str().is_empty() {
+            out.push(format!("{prefix}/"));
+            continue;
+        }
+
+        let rel_str = relative
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(relative.display().to_string()))?;
+        let archive_name = format!("{prefix}/{rel_str}");
+
+        if excludes.is_match(&archive_name) {
+            continue;
+        }
+
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        if is_dir {
+            out.push(format!("{archive_name}/"));
         } else {
             out.push(archive_name);
         }

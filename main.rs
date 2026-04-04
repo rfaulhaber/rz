@@ -66,6 +66,8 @@ fn run(cli: Cli) -> Result<()> {
             exclude_vcs,
             exclude_backups,
             follow_symlinks,
+            exclude_vcs_ignores,
+            no_recursion,
             totals,
             dry_run,
         } => {
@@ -76,25 +78,30 @@ fn run(cli: Cli) -> Result<()> {
             }
 
             // Build combined exclude set.
-            let mut all_excludes = exclude;
-            for path in &exclude_from {
-                all_excludes.extend(filter::read_patterns_from_file(path)?);
-            }
+            let mut extra_patterns = exclude;
             if exclude_vcs {
                 for pat in &[".git", ".hg", ".svn", ".bzr", "_darcs", ".pijul", "CVS"] {
-                    all_excludes.push((*pat).to_owned());
+                    extra_patterns.push((*pat).to_owned());
                 }
             }
             if exclude_backups {
                 for pat in &["*~", "*.bak", "#*#", ".#*"] {
-                    all_excludes.push((*pat).to_owned());
+                    extra_patterns.push((*pat).to_owned());
                 }
             }
-            let excludes = filter::build_exclude_set(&all_excludes)?;
+            let excludes = filter::build_excludes(extra_patterns, &exclude_from)?;
 
             // Dry-run: list what would be compressed and exit.
             if dry_run {
-                let paths = filter::collect_compress_paths(&input, &excludes)?;
+                let dry_opts = CompressOpts {
+                    level,
+                    excludes,
+                    follow_symlinks,
+                    exclude_vcs_ignores,
+                    no_recursion,
+                    progress: &NoProgress,
+                };
+                let paths = filter::collect_compress_paths(&input, &dry_opts)?;
                 let mut stdout = std::io::stdout().lock();
                 for p in &paths {
                     let _ = writeln!(stdout, "{p}");
@@ -134,6 +141,8 @@ fn run(cli: Cli) -> Result<()> {
                 level,
                 excludes,
                 follow_symlinks,
+                exclude_vcs_ignores,
+                no_recursion,
                 progress,
             };
 
@@ -188,6 +197,9 @@ fn run(cli: Cli) -> Result<()> {
             exclude,
             exclude_from,
             include,
+            backup,
+            suffix,
+            preserve_permissions,
             totals,
             dry_run,
             paths,
@@ -206,12 +218,7 @@ fn run(cli: Cli) -> Result<()> {
                 ));
             }
 
-            // Build combined exclude set.
-            let mut all_excludes = exclude;
-            for path in &exclude_from {
-                all_excludes.extend(filter::read_patterns_from_file(path)?);
-            }
-            let excludes = filter::build_exclude_set(&all_excludes)?;
+            let excludes = filter::build_excludes(exclude, &exclude_from)?;
             let includes = {
                 let mut all_includes = include;
                 all_includes.extend(paths);
@@ -261,6 +268,13 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 &*base_progress
             };
+            let backup_suffix = if let Some(s) = suffix {
+                Some(s)
+            } else if backup {
+                Some(".bak".to_owned())
+            } else {
+                None
+            };
             let opts = DecompressOpts {
                 force,
                 no_overwrite,
@@ -269,6 +283,8 @@ fn run(cli: Cli) -> Result<()> {
                 strip_components,
                 includes,
                 excludes,
+                backup_suffix,
+                preserve_permissions,
                 progress,
             };
 
@@ -360,12 +376,7 @@ fn run(cli: Cli) -> Result<()> {
                 )),
             };
 
-            // Build combined exclude set.
-            let mut all_excludes = exclude;
-            for path in &exclude_from {
-                all_excludes.extend(filter::read_patterns_from_file(path)?);
-            }
-            let excludes = filter::build_exclude_set(&all_excludes)?;
+            let excludes = filter::build_excludes(exclude, &exclude_from)?;
 
             if let Some(ref field) = sort {
                 match field {

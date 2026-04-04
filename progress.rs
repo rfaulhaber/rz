@@ -7,7 +7,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 /// Two implementations exist: [`BarProgress`] (real progress bar on stderr)
 /// and [`NoProgress`] (silent no-op).  Using a trait lets the format modules
 /// remain completely unaware of the progress UI.
-pub trait ProgressReport {
+pub trait ProgressReport: Send + Sync {
     /// Set the total expected byte count (enables percentage + ETA).
     fn set_length(&self, len: u64);
 

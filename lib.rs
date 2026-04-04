@@ -39,6 +39,8 @@ pub struct CompressOpts<'a> {
     pub level: Option<u32>,
     pub excludes: GlobSet,
     pub follow_symlinks: bool,
+    pub exclude_vcs_ignores: bool,
+    pub no_recursion: bool,
     pub progress: &'a dyn ProgressReport,
 }
 
@@ -51,6 +53,8 @@ pub struct DecompressOpts<'a> {
     pub strip_components: u32,
     pub includes: GlobSet,
     pub excludes: GlobSet,
+    pub backup_suffix: Option<String>,
+    pub preserve_permissions: bool,
     pub progress: &'a dyn ProgressReport,
 }
 
@@ -61,6 +65,8 @@ impl CompressOpts<'_> {
             level,
             excludes,
             follow_symlinks: false,
+            exclude_vcs_ignores: false,
+            no_recursion: false,
             progress: &NoProgress,
         }
     }
@@ -68,7 +74,12 @@ impl CompressOpts<'_> {
 
 impl DecompressOpts<'_> {
     /// Construct opts with no progress reporting (for tests / programmatic use).
-    pub fn new(force: bool, strip_components: u32, includes: GlobSet, excludes: GlobSet) -> DecompressOpts<'static> {
+    pub fn new(
+        force: bool,
+        strip_components: u32,
+        includes: GlobSet,
+        excludes: GlobSet,
+    ) -> DecompressOpts<'static> {
         DecompressOpts {
             force,
             no_overwrite: false,
@@ -77,7 +88,19 @@ impl DecompressOpts<'_> {
             strip_components,
             includes,
             excludes,
+            backup_suffix: None,
+            preserve_permissions: false,
             progress: &NoProgress,
         }
+    }
+
+    pub(crate) fn can_fast_path(&self) -> bool {
+        self.force
+            && self.includes.is_empty()
+            && self.excludes.is_empty()
+            && !self.no_overwrite
+            && !self.keep_newer
+            && !self.no_directory
+            && self.backup_suffix.is_none()
     }
 }

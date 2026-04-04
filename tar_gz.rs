@@ -1,13 +1,18 @@
 use std::io::{self, BufReader, BufWriter};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSlice;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::filter;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
+
+/// Block size for parallel gzip compression (1 MiB).
+const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
@@ -17,31 +22,19 @@ pub fn compress(
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let level = opts.level.unwrap_or(6);
-    let file = fs_err::File::create(output)?;
-    let buf = BufWriter::new(file);
-    let gz = GzEncoder::new(buf, Compression::new(level));
-    let mut builder = tar::Builder::new(gz);
-    builder.follow_symlinks(opts.follow_symlinks);
 
-    for input in inputs {
-        let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
-            continue;
-        }
-        if meta.is_dir() {
-            filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.follow_symlinks, opts.progress)?;
-        } else {
-            let size = meta.len();
-            builder.append_path_with_name(input, name)?;
-            opts.progress.set_entry(name);
-            opts.progress.inc(size);
-        }
+    // Buffer the tar archive in memory, then gzip-compress in parallel blocks.
+    let mut tar_data = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_data);
+        builder.follow_symlinks(opts.follow_symlinks);
+        filter::append_inputs(&mut builder, inputs, opts)?;
+        builder.into_inner()?;
     }
 
-    // Explicit finalization: Builder → GzEncoder → BufWriter → File
-    let gz = builder.into_inner()?;
-    let buf = gz.finish()?;
+    let file = fs_err::File::create(output)?;
+    let mut buf = BufWriter::new(file);
+    parallel_gz_compress(&tar_data, &mut buf, level)?;
     let file = buf.into_inner().map_err(io::Error::other)?;
     file.sync_all()?;
 
@@ -52,33 +45,42 @@ pub fn compress(
 
 pub fn compress_to_writer<W: std::io::Write>(
     inputs: &[Utf8PathBuf],
-    writer: W,
+    mut writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let level = opts.level.unwrap_or(6);
-    let buf = BufWriter::new(writer);
-    let gz = GzEncoder::new(buf, Compression::new(level));
-    let mut builder = tar::Builder::new(gz);
-    builder.follow_symlinks(opts.follow_symlinks);
 
-    for input in inputs {
-        let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
-            continue;
-        }
-        if meta.is_dir() {
-            filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.follow_symlinks, opts.progress)?;
-        } else {
-            let size = meta.len();
-            builder.append_path_with_name(input, name)?;
-            opts.progress.set_entry(name);
-            opts.progress.inc(size);
-        }
+    let mut tar_data = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_data);
+        builder.follow_symlinks(opts.follow_symlinks);
+        filter::append_inputs(&mut builder, inputs, opts)?;
+        builder.into_inner()?;
     }
 
-    let gz = builder.into_inner()?;
-    gz.finish()?;
+    parallel_gz_compress(&tar_data, &mut writer, level)?;
+    Ok(())
+}
+
+/// Compress data in parallel gzip blocks.
+///
+/// Splits input into independently-compressed blocks and concatenates the
+/// results. Concatenated gzip streams are valid per RFC 1952 — decompressors
+/// transparently join them.
+fn parallel_gz_compress<W: io::Write>(data: &[u8], writer: &mut W, level: u32) -> io::Result<()> {
+    let compressed: Vec<Vec<u8>> = data
+        .par_chunks(PARALLEL_BLOCK_SIZE)
+        .map(|chunk| {
+            let buf = Vec::with_capacity(chunk.len());
+            let mut enc = GzEncoder::new(buf, Compression::new(level));
+            io::Write::write_all(&mut enc, chunk)?;
+            enc.finish()
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    for block in &compressed {
+        writer.write_all(block)?;
+    }
     Ok(())
 }
 
@@ -91,7 +93,7 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
 }
 
 pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
-    let gz = GzDecoder::new(reader);
+    let gz = MultiGzDecoder::new(reader);
     let mut archive = tar::Archive::new(gz);
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
     Ok(())
@@ -106,7 +108,7 @@ pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W,
 }
 
 pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
-    let gz = GzDecoder::new(reader);
+    let gz = MultiGzDecoder::new(reader);
     let mut archive = tar::Archive::new(gz);
     filter::extract_tar_to_writer(&mut archive, writer, opts)
 }
@@ -116,7 +118,7 @@ pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: 
 pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
-    let gz = GzDecoder::new(buf);
+    let gz = MultiGzDecoder::new(buf);
     let mut archive = tar::Archive::new(gz);
     filter::verify_tar_entries(&mut archive, progress)
 }
@@ -126,25 +128,9 @@ pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) ->
 pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
-    let gz = GzDecoder::new(buf);
+    let gz = MultiGzDecoder::new(buf);
     let mut archive = tar::Archive::new(gz);
-
-    let mut entries = Vec::new();
-    for entry in archive.entries()? {
-        let entry = entry?;
-        let header = entry.header();
-        let path = entry.path()?;
-        let path = Utf8PathBuf::try_from(path.into_owned())
-            .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
-        entries.push(Entry {
-            path,
-            size: header.size()?,
-            mtime: header.mtime()?,
-            mode: header.mode()?,
-            is_dir: header.entry_type().is_dir(),
-        });
-    }
-    Ok(entries)
+    filter::list_tar_entries(&mut archive)
 }
 
 // ── Info ──────────────────────────────────────────────────────────────────────
@@ -154,16 +140,9 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
-    let gz = GzDecoder::new(buf);
+    let gz = MultiGzDecoder::new(buf);
     let mut archive = tar::Archive::new(gz);
-
-    let mut entry_count: usize = 0;
-    let mut total_uncompressed: u64 = 0;
-    for entry in archive.entries()? {
-        let entry = entry?;
-        total_uncompressed += entry.header().size()?;
-        entry_count += 1;
-    }
+    let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
 
     Ok(ArchiveInfo {
         format: "tar.gz",

@@ -1,12 +1,16 @@
-use std::io::{BufReader, BufWriter, Cursor};
+use std::io::{self, BufReader, BufWriter, Cursor};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use ruzstd::decoding::StreamingDecoder;
+use rayon::iter::ParallelIterator;
+use rayon::slice::ParallelSlice;
 use ruzstd::encoding::CompressionLevel;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::filter;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
+
+/// Block size for parallel zstd compression (1 MiB).
+const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
@@ -15,27 +19,11 @@ pub fn compress(
     output: &Utf8Path,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
-    // ruzstd's compressor is pull-based (Read → Write), so we build the tar
-    // archive in memory first, then compress to the output file.
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
         builder.follow_symlinks(opts.follow_symlinks);
-        for input in inputs {
-            let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-            let name = input.file_name().unwrap_or(input.as_str());
-            if opts.excludes.is_match(name) {
-                continue;
-            }
-            if meta.is_dir() {
-                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.follow_symlinks, opts.progress)?;
-            } else {
-                let size = meta.len();
-                builder.append_path_with_name(input, name)?;
-                opts.progress.set_entry(name);
-                opts.progress.inc(size);
-            }
-        }
+        filter::append_inputs(&mut builder, inputs, opts)?;
         builder.into_inner()?;
     }
 
@@ -46,7 +34,7 @@ pub fn compress(
 
     let file = fs_err::File::create(output)?;
     let mut buf = BufWriter::new(file);
-    ruzstd::encoding::compress(Cursor::new(tar_data), &mut buf, level);
+    parallel_zst_compress(&tar_data, &mut buf, level)?;
     let file = buf.into_inner().map_err(std::io::Error::other)?;
     file.sync_all()?;
 
@@ -60,26 +48,11 @@ pub fn compress_to_writer<W: std::io::Write>(
     mut writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
-    // ruzstd's compressor is pull-based, so buffer tar in memory first.
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
         builder.follow_symlinks(opts.follow_symlinks);
-        for input in inputs {
-            let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-            let name = input.file_name().unwrap_or(input.as_str());
-            if opts.excludes.is_match(name) {
-                continue;
-            }
-            if meta.is_dir() {
-                filter::append_dir_filtered(&mut builder, input, name, &opts.excludes, opts.follow_symlinks, opts.progress)?;
-            } else {
-                let size = meta.len();
-                builder.append_path_with_name(input, name)?;
-                opts.progress.set_entry(name);
-                opts.progress.inc(size);
-            }
-        }
+        filter::append_inputs(&mut builder, inputs, opts)?;
         builder.into_inner()?;
     }
 
@@ -88,7 +61,32 @@ pub fn compress_to_writer<W: std::io::Write>(
         _ => CompressionLevel::Fastest,
     };
 
-    ruzstd::encoding::compress(Cursor::new(tar_data), &mut writer, level);
+    parallel_zst_compress(&tar_data, &mut writer, level)?;
+    Ok(())
+}
+
+/// Compress data in parallel zstd blocks.
+///
+/// Splits input into independently-compressed frames and writes them
+/// sequentially. Concatenated zstd frames are valid — decoders transparently
+/// join them.
+fn parallel_zst_compress<W: io::Write>(
+    data: &[u8],
+    writer: &mut W,
+    level: CompressionLevel,
+) -> io::Result<()> {
+    let compressed: Vec<Vec<u8>> = data
+        .par_chunks(PARALLEL_BLOCK_SIZE)
+        .map(|chunk| {
+            let mut buf = Vec::with_capacity(chunk.len());
+            ruzstd::encoding::compress(Cursor::new(chunk), &mut buf, level);
+            buf
+        })
+        .collect();
+
+    for block in &compressed {
+        writer.write_all(block)?;
+    }
     Ok(())
 }
 
@@ -101,8 +99,8 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     Ok(())
 }
 
-pub fn decompress_from_reader<R: std::io::BufRead>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
-    let decoder = StreamingDecoder::new(reader)
+pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+    let decoder = MultiFrameDecoder::new(reader)
         .map_err(std::io::Error::other)?;
     let mut archive = tar::Archive::new(decoder);
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
@@ -117,8 +115,8 @@ pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W,
     filter::extract_tar_to_writer(&mut archive, writer, opts)
 }
 
-pub fn decompress_reader_to_writer<R: std::io::BufRead, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
-    let decoder = StreamingDecoder::new(reader)
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+    let decoder = MultiFrameDecoder::new(reader)
         .map_err(std::io::Error::other)?;
     let mut archive = tar::Archive::new(decoder);
     filter::extract_tar_to_writer(&mut archive, writer, opts)
@@ -137,23 +135,7 @@ pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) ->
 pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let decoder = open_decoder(input)?;
     let mut archive = tar::Archive::new(decoder);
-
-    let mut entries = Vec::new();
-    for entry in archive.entries()? {
-        let entry = entry?;
-        let header = entry.header();
-        let path = entry.path()?;
-        let path = Utf8PathBuf::try_from(path.into_owned())
-            .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
-        entries.push(Entry {
-            path,
-            size: header.size()?,
-            mtime: header.mtime()?,
-            mode: header.mode()?,
-            is_dir: header.entry_type().is_dir(),
-        });
-    }
-    Ok(entries)
+    filter::list_tar_entries(&mut archive)
 }
 
 // ── Info ──────────────────────────────────────────────────────────────────────
@@ -163,14 +145,7 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 
     let decoder = open_decoder(input)?;
     let mut archive = tar::Archive::new(decoder);
-
-    let mut entry_count: usize = 0;
-    let mut total_uncompressed: u64 = 0;
-    for entry in archive.entries()? {
-        let entry = entry?;
-        total_uncompressed += entry.header().size()?;
-        entry_count += 1;
-    }
+    let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
 
     Ok(ArchiveInfo {
         format: "tar.zst",
@@ -182,11 +157,73 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Open a `.tar.zst` file and return a streaming zstd decoder.
-fn open_decoder(
-    input: &Utf8Path,
-) -> Result<StreamingDecoder<BufReader<fs_err::File>, ruzstd::decoding::FrameDecoder>> {
+/// Open a `.tar.zst` file and return a multi-frame zstd decoder.
+fn open_decoder(input: &Utf8Path) -> Result<MultiFrameDecoder<BufReader<fs_err::File>>> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
-    StreamingDecoder::new(buf).map_err(|e| std::io::Error::other(e).into())
+    MultiFrameDecoder::new(buf).map_err(Into::into)
+}
+
+/// Zstd decoder that handles multiple concatenated frames.
+///
+/// `ruzstd::StreamingDecoder` only decodes a single frame. When parallel
+/// compression produces multiple frames, this wrapper detects frame boundaries
+/// via `into_inner()` and re-initialises a new decoder for each subsequent
+/// frame.
+struct MultiFrameDecoder<R: io::Read> {
+    state: DecoderState<R>,
+}
+
+enum DecoderState<R: io::Read> {
+    Active(Box<ruzstd::decoding::StreamingDecoder<R, ruzstd::decoding::FrameDecoder>>),
+    /// Source is available between frames (previous decoder finished).
+    Between(R),
+    /// All frames consumed or source exhausted.
+    Done,
+}
+
+impl<R: io::Read> MultiFrameDecoder<R> {
+    fn new(source: R) -> io::Result<Self> {
+        let decoder = ruzstd::decoding::StreamingDecoder::new(source)
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            state: DecoderState::Active(Box::new(decoder)),
+        })
+    }
+}
+
+impl<R: io::Read> io::Read for MultiFrameDecoder<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match &mut self.state {
+                DecoderState::Active(decoder) => {
+                    let n = decoder.read(buf)?;
+                    if n > 0 {
+                        return Ok(n);
+                    }
+                    // Frame exhausted — reclaim source for next frame.
+                    let old = std::mem::replace(&mut self.state, DecoderState::Done);
+                    if let DecoderState::Active(decoder) = old {
+                        self.state = DecoderState::Between(decoder.into_inner());
+                    }
+                }
+                DecoderState::Between(_) => {
+                    let old = std::mem::replace(&mut self.state, DecoderState::Done);
+                    if let DecoderState::Between(source) = old {
+                        match ruzstd::decoding::StreamingDecoder::new(source) {
+                            Ok(decoder) => {
+                                self.state = DecoderState::Active(Box::new(decoder));
+                            }
+                            Err(_) => {
+                                // No more valid frames (e.g. EOF reached during
+                                // header read) — treat as end of stream.
+                                return Ok(0);
+                            }
+                        }
+                    }
+                }
+                DecoderState::Done => return Ok(0),
+            }
+        }
+    }
 }

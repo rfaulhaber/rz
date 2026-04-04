@@ -5,18 +5,49 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
-pub fn compress(
-    inputs: &[Utf8PathBuf],
-    output: &Utf8Path,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
+pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let mut writer = sevenz_rust2::ArchiveWriter::create(output)?;
     for input in inputs {
-        let excludes = &opts.excludes;
-        writer.push_source_path(input, |name| !excludes.is_match(name))?;
+        let meta = crate::filter::input_metadata(input, opts.follow_symlinks)?;
+        if meta.is_dir() && opts.no_recursion {
+            // Only add the directory entry, not its contents.
+            continue;
+        }
+        if meta.is_dir() && opts.exclude_vcs_ignores {
+            push_dir_vcs(&mut writer, input, opts)?;
+        } else {
+            let excludes = &opts.excludes;
+            writer.push_source_path(input, |name| !excludes.is_match(name))?;
+        }
     }
     let file = writer.finish()?;
     file.sync_all()?;
+    Ok(())
+}
+
+/// Walk a directory with VCS-ignore awareness and add entries to the 7z writer.
+fn push_dir_vcs(
+    writer: &mut sevenz_rust2::ArchiveWriter<std::fs::File>,
+    dir: &Utf8Path,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    for result in crate::filter::vcs_walker(dir, opts.follow_symlinks) {
+        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        let fs_path = entry.path();
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+
+        if is_dir {
+            continue;
+        }
+
+        let utf8_str = fs_path
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?;
+        let utf8_path = Utf8Path::new(utf8_str);
+
+        let excludes = &opts.excludes;
+        writer.push_source_path(utf8_path, |name| !excludes.is_match(name))?;
+    }
     Ok(())
 }
 
@@ -26,12 +57,12 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     if opts.strip_components > 0 {
         return Err(Error::StripComponentsUnsupported("7z".to_owned()));
     }
-    let use_extract_fn = !opts.includes.is_empty()
-        || !opts.excludes.is_empty()
-        || opts.no_overwrite
-        || opts.keep_newer
-        || opts.no_directory;
-    if use_extract_fn {
+    // Use the fast path only when force is set and no filtering/special
+    // options are active.  Otherwise we need the callback to enforce
+    // overwrite guards, include/exclude, and backup logic.
+    if opts.can_fast_path() {
+        sevenz_rust2::decompress_file(input, output)?;
+    } else {
         sevenz_rust2::decompress_file_with_extract_fn(input, output, |entry, reader, dest| {
             if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
                 return Ok(true);
@@ -49,12 +80,24 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             };
             let out_path = dest.join(&out_name);
             if !entry.is_directory && out_path.exists() {
-                if opts.keep_newer {
+                if let Some(ref suffix) = opts.backup_suffix {
+                    let backup_name = format!("{}{suffix}", out_path.display());
+                    fs_err::rename(&out_path, Utf8Path::new(&backup_name))
+                        .map_err(|e| sevenz_rust2::Error::Io(e, backup_name.into()))?;
+                } else if opts.keep_newer {
                     // 7z entries don't reliably expose mtime; skip if file exists.
                     return Ok(true);
-                }
-                if opts.no_overwrite {
+                } else if opts.no_overwrite {
                     return Ok(true);
+                } else if !opts.force {
+                    let utf8 = Utf8PathBuf::from(out_path.display().to_string());
+                    return Err(sevenz_rust2::Error::Io(
+                        std::io::Error::new(
+                            std::io::ErrorKind::AlreadyExists,
+                            format!("file already exists: {utf8} (use --force to overwrite)"),
+                        ),
+                        utf8.into_string().into(),
+                    ));
                 }
             }
             if opts.no_directory {
@@ -68,15 +111,17 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                 sevenz_rust2::default_entry_extract_fn(entry, reader, dest)
             }
         })?;
-    } else {
-        sevenz_rust2::decompress_file(input, output)?;
     }
     Ok(())
 }
 
 // ── Decompress to writer ─────────────────────────────────────────────────────
 
-pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_to_writer<W: std::io::Write>(
+    input: &Utf8Path,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     sevenz_rust2::decompress_file_with_extract_fn(input, ".", |entry, reader, _dest| {
         if entry.is_directory {
             return Ok(true);
@@ -129,17 +174,10 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
     let compressed_size = fs_err::metadata(input)?.len();
     let archive = sevenz_rust2::Archive::open(input)?;
 
-    let mut entry_count: usize = 0;
-    let mut total_uncompressed: u64 = 0;
-    for file in &archive.files {
-        total_uncompressed += file.size;
-        entry_count += 1;
-    }
-
     Ok(ArchiveInfo {
         format: "7z",
-        entry_count,
-        total_uncompressed,
+        entry_count: archive.files.len(),
+        total_uncompressed: archive.files.iter().map(|f| f.size).sum(),
         compressed_size,
     })
 }
