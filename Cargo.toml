@@ -1,6 +1,6 @@
 [package]
 name = "rz-archive"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Multi-format archive tool — tar, zip, 7z with a unified CLI"
@@ -33,6 +33,7 @@ rayon = "1.10"
 ruzstd = "0.8"
 tar = "0.4"
 thiserror = "2"
+time = "0.3"
 xz2 = { version = "0.1", optional = true }
 sevenz-rust2 = "0.20"
 zip = "8.5"

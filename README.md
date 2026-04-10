@@ -72,6 +72,30 @@ rz compress mydir -o archive -f tar-gz -l 9
 # Exclude patterns (glob, repeatable)
 rz compress mydir -o mydir.tar.gz --exclude '*.log' --exclude node_modules
 
+# Read exclude patterns from a file (one per line)
+rz compress mydir -o mydir.tar.gz --exclude-from .archiveignore
+
+# Read input file list from a file (one path per line)
+rz compress -T filelist.txt -o bundle.tar.gz
+
+# Exclude version-control directories and backup files
+rz compress mydir -o mydir.tar.gz --exclude-vcs --exclude-backups
+
+# Respect .gitignore rules
+rz compress mydir -o mydir.tar.gz --exclude-vcs-ignores
+
+# Follow symlinks (archive target content instead of the link)
+rz compress mydir -o mydir.tar.gz -H
+
+# Do not recurse into directories
+rz compress mydir -o mydir.tar.gz --no-recursion
+
+# Dry run: show what would be compressed without creating an archive
+rz compress mydir -o mydir.tar.gz -n
+
+# Print total bytes processed at the end
+rz compress mydir -o mydir.tar.gz --totals
+
 # Compress to stdout (tar-based formats; requires --format)
 rz compress mydir -o - -f tar-gz | ssh host 'rz d - -f tar-gz'
 
@@ -94,6 +118,9 @@ rz decompress mydir.tar.gz --strip-components 1
 # Exclude files during extraction
 rz decompress mydir.zip --exclude '*.test.js'
 
+# Read exclude patterns from a file (one per line)
+rz decompress mydir.tar.gz --exclude-from .archiveignore
+
 # Extract only matching files (--include glob or positional paths)
 rz decompress project.tar.gz --include '*.rs'
 rz decompress release.tar.gz src/main.rs
@@ -106,6 +133,28 @@ cat mydir.tar.gz | rz decompress - -f tar-gz -o /tmp/out
 
 # Overwrite existing files
 rz decompress mydir.tar.gz -F
+
+# Skip existing files silently instead of erroring
+rz decompress mydir.tar.gz --no-overwrite
+
+# Only extract entries newer than existing files on disk
+rz decompress mydir.tar.gz -u
+
+# Flatten directory structure (extract all files into output dir)
+rz decompress mydir.tar.gz -j
+
+# Backup existing files instead of overwriting (appends .bak)
+rz decompress mydir.tar.gz --backup
+rz decompress mydir.tar.gz --suffix .orig
+
+# Restore original file permissions from archive metadata
+rz decompress mydir.tar.gz -P
+
+# Dry run: show what would be extracted without writing to disk
+rz decompress mydir.tar.gz -n
+
+# Print total bytes processed at the end
+rz decompress mydir.tar.gz --totals
 
 # Short alias
 rz d mydir.tar.gz
@@ -122,6 +171,17 @@ rz list mydir.zip -l
 
 # Filter listing
 rz list mydir.tar.gz --exclude '*.log'
+
+# Read exclude patterns from a file
+rz list mydir.tar.gz --exclude-from .archiveignore
+
+# Sort entries
+rz list mydir.tar.gz --sort name
+rz list mydir.tar.gz --sort size
+rz list mydir.tar.gz --sort date
+
+# Human-readable sizes
+rz list mydir.tar.gz -l --human-readable
 
 # Short alias
 rz ls mydir.tar.gz
@@ -147,6 +207,9 @@ rz info mydir.tar.gz
 # Entries:      42
 # Compressed:   1048576 bytes
 # Uncompressed: 3145728 bytes
+
+# Human-readable sizes
+rz info mydir.tar.gz --human-readable
 ```
 
 ### Global options
@@ -155,6 +218,7 @@ rz info mydir.tar.gz
 |--------------------|------------------------------------------|
 | `-p`, `--progress` | Show a progress bar                      |
 | `-v`, `--verbose`  | Print each entry name to stderr          |
+| `-q`, `--quiet`    | Suppress all non-error output            |
 | `-V`, `--version`  | Print version                            |
 | `-h`, `--help`     | Print help                               |
 
@@ -181,6 +245,11 @@ archive in memory before compressing) and bzip2 is unavailable.
 - **Stdin/stdout streaming**: Only tar-based formats support `-` for
   stdin/stdout. ZIP and 7z require seekable I/O and will error.
 - **Symlinks**: Followed during compression rather than stored as symlinks.
+- **Zip list -l**: Per-entry sizes and permissions are not shown for zip archives
+  in long-listing mode. The upstream `zip` crate does not expose central
+  directory metadata without seeking to each entry's local file header, which
+  would negate the performance benefit of reading only the central directory.
+  Listing zip entry names (without `-l`) is instant regardless of archive size.
 
 ## License
 

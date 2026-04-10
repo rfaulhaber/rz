@@ -35,9 +35,8 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
             }
         } else {
             zip.start_file(name, options)?;
-            let data = fs_err::read(input)?;
-            let size = data.len() as u64;
-            io::Write::write_all(&mut zip, &data)?;
+            let mut f = fs_err::File::open(input)?;
+            let size = io::copy(&mut f, &mut zip)?;
             opts.progress.set_entry(name);
             opts.progress.inc(size);
         }
@@ -89,9 +88,8 @@ fn add_dir_recursive(
             add_dir_recursive(zip, child, &name, options, opts)?;
         } else {
             zip.start_file(&name, options)?;
-            let data = fs_err::read(child)?;
-            let size = data.len() as u64;
-            io::Write::write_all(zip, &data)?;
+            let mut f = fs_err::File::open(child)?;
+            let size = io::copy(&mut f, zip)?;
             opts.progress.set_entry(&name);
             opts.progress.inc(size);
         }
@@ -141,9 +139,8 @@ fn add_dir_vcs(
                     .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
             );
             zip.start_file(&archive_name, options)?;
-            let data = fs_err::read(utf8_path)?;
-            let size = data.len() as u64;
-            io::Write::write_all(zip, &data)?;
+            let mut f = fs_err::File::open(utf8_path)?;
+            let size = io::copy(&mut f, zip)?;
             opts.progress.set_entry(&archive_name);
             opts.progress.inc(size);
         }
@@ -154,20 +151,22 @@ fn add_dir_vcs(
 // ── Decompress ────────────────────────────────────────────────────────────────
 
 pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
-    let len = {
+    let (len, shared_metadata) = {
         let file = fs_err::File::open(input)?;
-        ZipArchive::new(file)?.len()
+        let archive = ZipArchive::new(file)?;
+        (archive.len(), archive.metadata())
     };
 
     (0..len).into_par_iter().try_for_each_init(
         || -> Option<ZipArchive<fs_err::File>> {
             let file = fs_err::File::open(input).ok()?;
-            ZipArchive::new(file).ok()
+            // SAFETY: metadata was parsed from the same file.
+            Some(unsafe { ZipArchive::unsafe_new_with_metadata(file, shared_metadata.clone()) })
         },
         |maybe_archive, i| -> Result<()> {
-            let archive = maybe_archive.as_mut().ok_or_else(|| {
-                Error::Io(io::Error::other("failed to open zip archive"))
-            })?;
+            let archive = maybe_archive
+                .as_mut()
+                .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
             let mut entry = archive.by_index(i)?;
             let name = Utf8PathBuf::from(entry.name());
 
@@ -274,20 +273,22 @@ pub fn decompress_to_writer<W: std::io::Write>(
 // ── Test ──────────────────────────────────────────────────────────────────────
 
 pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
-    let len = {
+    let (len, shared_metadata) = {
         let file = fs_err::File::open(input)?;
-        ZipArchive::new(file)?.len()
+        let archive = ZipArchive::new(file)?;
+        (archive.len(), archive.metadata())
     };
 
     (0..len).into_par_iter().try_for_each_init(
         || -> Option<ZipArchive<fs_err::File>> {
             let file = fs_err::File::open(input).ok()?;
-            ZipArchive::new(file).ok()
+            // SAFETY: metadata was parsed from the same file.
+            Some(unsafe { ZipArchive::unsafe_new_with_metadata(file, shared_metadata.clone()) })
         },
         |maybe_archive, i| -> Result<()> {
-            let archive = maybe_archive.as_mut().ok_or_else(|| {
-                Error::Io(io::Error::other("failed to open zip archive"))
-            })?;
+            let archive = maybe_archive
+                .as_mut()
+                .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
             let mut entry = archive.by_index(i)?;
             let name = entry.name().to_owned();
             progress.set_entry(&name);
@@ -303,19 +304,24 @@ pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) ->
 
 pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let file = fs_err::File::open(input)?;
-    let mut archive = ZipArchive::new(file)?;
+    let archive = ZipArchive::new(file)?;
 
-    let mut entries = Vec::with_capacity(archive.len());
-    for i in 0..archive.len() {
-        let entry = archive.by_index_raw(i)?;
-        entries.push(Entry {
-            path: Utf8PathBuf::from(entry.name()),
-            size: entry.size(),
-            mtime: 0,
-            mode: entry.unix_mode().unwrap_or(0),
-            is_dir: entry.is_dir(),
-        });
-    }
+    // Use file_names() which reads from the already-parsed central directory
+    // without seeking to each local file header.  by_index_raw() would seek to
+    // every entry's local header — catastrophic for large archives.
+    let entries = archive
+        .file_names()
+        .map(|name| {
+            let is_dir = name.ends_with('/');
+            Entry {
+                path: Utf8PathBuf::from(name),
+                size: 0,
+                mtime: 0,
+                mode: 0,
+                is_dir,
+            }
+        })
+        .collect();
     Ok(entries)
 }
 
@@ -332,7 +338,7 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
     // directory with zero per-entry I/O.  Falls back to by_index_raw() only
     // when the archive uses data descriptors (uncommon).
     let total_uncompressed = match archive.decompressed_size() {
-        Some(size) => size as u64,
+        Some(size) => u64::try_from(size).unwrap_or(u64::MAX),
         None => {
             let mut total: u64 = 0;
             for i in 0..entry_count {
@@ -353,37 +359,21 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Convert a zip `DateTime` to an approximate unix epoch (seconds since
-/// 1970-01-01).  Good enough for mtime comparison.
+/// Convert a zip `DateTime` to a unix epoch (seconds since 1970-01-01).
+/// Returns 0 for any invalid or pre-epoch date.
 fn zip_datetime_to_epoch(dt: zip::DateTime) -> u64 {
-    let year = dt.year() as u64;
-    let month = dt.month() as u64;
-    let day = dt.day() as u64;
-    let hour = dt.hour() as u64;
-    let minute = dt.minute() as u64;
-    let second = dt.second() as u64;
-
-    // Cumulative days before each month (non-leap year).
-    const MONTH_DAYS: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-
-    let years_since_epoch = year.saturating_sub(1970);
-    let leap_years = if year > 1970 {
-        let y = year - 1;
-        (y / 4 - y / 100 + y / 400) - (1969 / 4 - 1969 / 100 + 1969 / 400)
-    } else {
-        0
+    let Some(month) = time::Month::try_from(dt.month()).ok() else {
+        return 0;
     };
-    let mut days = years_since_epoch * 365 + leap_years;
-    if (1..=12).contains(&month) {
-        days += MONTH_DAYS[(month - 1) as usize];
-    }
-    days += day.saturating_sub(1);
+    let Some(date) = time::Date::from_calendar_date(dt.year() as i32, month, dt.day()).ok() else {
+        return 0;
+    };
+    let Some(time) = time::Time::from_hms(dt.hour(), dt.minute(), dt.second()).ok() else {
+        return 0;
+    };
 
-    // Add leap day if past February in a leap year.
-    let is_leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
-    if month > 2 && is_leap {
-        days += 1;
-    }
-
-    days * 86400 + hour * 3600 + minute * 60 + second
+    let stamp = time::PrimitiveDateTime::new(date, time)
+        .assume_utc()
+        .unix_timestamp();
+    if stamp >= 0 { stamp as u64 } else { 0 }
 }

@@ -521,7 +521,7 @@ pub fn collect_compress_paths(
 ) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     for input in inputs {
-        let meta = fs_err::symlink_metadata(input)?;
+        let meta = input_metadata(input, opts.follow_symlinks)?;
         let name = input.file_name().unwrap_or(input.as_str());
         if opts.excludes.is_match(name) {
             continue;
@@ -532,7 +532,7 @@ pub fn collect_compress_paths(
             } else if opts.exclude_vcs_ignores {
                 collect_dir_paths_vcs(input, name, &opts.excludes, opts.follow_symlinks, &mut paths)?;
             } else {
-                collect_dir_paths(input, name, &opts.excludes, &mut paths)?;
+                collect_dir_paths(input, name, &opts.excludes, opts.follow_symlinks, &mut paths)?;
             }
         } else {
             paths.push(name.to_owned());
@@ -545,6 +545,7 @@ fn collect_dir_paths(
     dir: &Utf8Path,
     prefix: &str,
     excludes: &GlobSet,
+    follow_symlinks: bool,
     out: &mut Vec<String>,
 ) -> Result<()> {
     out.push(format!("{prefix}/"));
@@ -569,8 +570,14 @@ fn collect_dir_paths(
             .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
         let utf8_path = Utf8Path::new(entry_str);
 
-        if entry.file_type()?.is_dir() {
-            collect_dir_paths(utf8_path, &archive_name, excludes, out)?;
+        let is_dir = if follow_symlinks {
+            fs_err::metadata(utf8_path)?.is_dir()
+        } else {
+            entry.file_type()?.is_dir()
+        };
+
+        if is_dir {
+            collect_dir_paths(utf8_path, &archive_name, excludes, follow_symlinks, out)?;
         } else {
             out.push(archive_name);
         }
