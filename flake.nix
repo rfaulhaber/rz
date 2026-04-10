@@ -16,6 +16,7 @@
     ...
   }: let
     projectName = "rz";
+    cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       imports = [];
@@ -49,7 +50,7 @@
             pkgs.rustPlatform.buildRustPackage {
               inherit features;
               pname = projectName;
-              version = "0.5.0";
+              version = cargoToml.package.version;
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
             };
@@ -79,6 +80,7 @@
             rust-bin.stable.latest.default
             rust-analyzer
             cargo-nextest
+            cargo-release
           ];
         };
       };

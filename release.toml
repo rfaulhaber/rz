@@ -1,0 +1,8 @@
+[workspace]
+allow-branch = ["main"]
+sign-commit = true
+sign-tag = true
+push-remote = "origin"
+tag-prefix = "v"
+tag-name = "{{prefix}}{{version}}"
+publish = false
