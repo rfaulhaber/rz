@@ -84,7 +84,8 @@ rz compress mydir -o mydir.tar.gz --exclude-vcs --exclude-backups
 # Respect .gitignore rules
 rz compress mydir -o mydir.tar.gz --exclude-vcs-ignores
 
-# Follow symlinks (archive target content instead of the link)
+# By default, symlinks are stored as symlinks (tar-family and zip).
+# Use -H / --follow-symlinks to archive the target's content instead.
 rz compress mydir -o mydir.tar.gz -H
 
 # Do not recurse into directories
@@ -244,7 +245,11 @@ archive in memory before compressing) and bzip2 is unavailable.
   flat (does not preserve the top-level directory wrapper).
 - **Stdin/stdout streaming**: Only tar-based formats support `-` for
   stdin/stdout. ZIP and 7z require seekable I/O and will error.
-- **Symlinks**: Followed during compression rather than stored as symlinks.
+- **Symlinks**: tar-family and zip store symlinks as links by default; pass
+  `-H` / `--follow-symlinks` to archive the target's content instead. The zip
+  extractor in `rz` does not yet recreate stored links on disk (they extract
+  as text files containing the target path); tar does. 7z follows symlinks
+  unconditionally on compress — a limitation of the `sevenz-rust2` backend.
 - **Zip list -l**: Per-entry sizes and permissions are not shown for zip archives
   in long-listing mode. The upstream `zip` crate does not expose central
   directory metadata without seeking to each entry's local file header, which

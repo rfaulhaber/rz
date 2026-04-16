@@ -25,7 +25,9 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
         if opts.excludes.is_match(name) {
             continue;
         }
-        if meta.is_dir() {
+        if !opts.follow_symlinks && meta.file_type().is_symlink() {
+            write_symlink_entry(&mut zip, input, name, options, opts)?;
+        } else if meta.is_dir() {
             if opts.no_recursion {
                 zip.add_directory(format!("{name}/"), options)?;
             } else if opts.exclude_vcs_ignores {
@@ -78,13 +80,17 @@ fn add_dir_recursive(
             continue;
         }
 
+        let file_type = entry.file_type()?;
+        let is_symlink = !opts.follow_symlinks && file_type.is_symlink();
         let is_dir = if opts.follow_symlinks {
             fs_err::metadata(child)?.is_dir()
         } else {
-            entry.file_type()?.is_dir()
+            file_type.is_dir()
         };
 
-        if is_dir {
+        if is_symlink {
+            write_symlink_entry(zip, child, &name, options, opts)?;
+        } else if is_dir {
             add_dir_recursive(zip, child, &name, options, opts)?;
         } else {
             zip.start_file(&name, options)?;
@@ -128,16 +134,22 @@ fn add_dir_vcs(
             continue;
         }
 
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let file_type = entry.file_type();
+        let is_dir = file_type.is_some_and(|ft| ft.is_dir());
+        let is_symlink =
+            !opts.follow_symlinks && file_type.is_some_and(|ft| ft.is_symlink());
 
-        if is_dir {
+        let utf8_path = Utf8Path::new(
+            fs_path
+                .to_str()
+                .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
+        );
+
+        if is_symlink {
+            write_symlink_entry(zip, utf8_path, &archive_name, options, opts)?;
+        } else if is_dir {
             zip.add_directory(format!("{archive_name}/"), options)?;
         } else {
-            let utf8_path = Utf8Path::new(
-                fs_path
-                    .to_str()
-                    .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
-            );
             zip.start_file(&archive_name, options)?;
             let mut f = fs_err::File::open(utf8_path)?;
             let size = io::copy(&mut f, zip)?;
@@ -145,6 +157,27 @@ fn add_dir_vcs(
             opts.progress.inc(size);
         }
     }
+    Ok(())
+}
+
+/// Store a symlink as a symlink entry (POSIX-style, with `S_IFLNK` mode and
+/// the link target as the entry content). The `zip` crate sets `0o777`
+/// permissions by default; Windows unzip tools may materialise this as a
+/// regular text file containing the target path.
+fn write_symlink_entry(
+    zip: &mut ZipWriter<fs_err::File>,
+    link_path: &Utf8Path,
+    archive_name: &str,
+    options: SimpleFileOptions,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    let target = fs_err::read_link(link_path)?;
+    let target_str = target
+        .to_str()
+        .ok_or_else(|| Error::InvalidUtf8Path(target.display().to_string()))?;
+    zip.add_symlink_from_path(archive_name, target_str, options)?;
+    opts.progress.set_entry(archive_name);
+    opts.progress.inc(target_str.len() as u64);
     Ok(())
 }
 

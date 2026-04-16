@@ -208,7 +208,14 @@ pub fn append_dir_filtered<W: std::io::Write>(
         return append_dir_vcs(builder, dir, prefix, opts);
     }
 
-    append_dir_simple(builder, dir, prefix, &opts.excludes, opts.follow_symlinks, opts.progress)
+    append_dir_simple(
+        builder,
+        dir,
+        prefix,
+        &opts.excludes,
+        opts.follow_symlinks,
+        opts.progress,
+    )
 }
 
 /// Standard directory walk (no VCS-ignore awareness).
@@ -222,8 +229,7 @@ fn append_dir_simple<W: std::io::Write>(
 ) -> Result<()> {
     builder.append_dir(prefix, dir)?;
 
-    let mut entries: Vec<_> =
-        fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut entries: Vec<_> = fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
@@ -250,9 +256,16 @@ fn append_dir_simple<W: std::io::Write>(
         };
 
         if is_dir {
-            append_dir_simple(builder, utf8_path, &archive_name, excludes, follow_symlinks, progress)?;
+            append_dir_simple(
+                builder,
+                utf8_path,
+                &archive_name,
+                excludes,
+                follow_symlinks,
+                progress,
+            )?;
         } else {
-            let meta = fs_err::metadata(utf8_path)?;
+            let meta = input_metadata(utf8_path, follow_symlinks)?;
             builder.append_path_with_name(utf8_path, &archive_name)?;
             progress.set_entry(&archive_name);
             progress.inc(meta.len());
@@ -302,7 +315,7 @@ fn append_dir_vcs<W: std::io::Write>(
                     .to_str()
                     .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
             );
-            let meta = fs_err::metadata(utf8_path)?;
+            let meta = input_metadata(utf8_path, opts.follow_symlinks)?;
             builder.append_path_with_name(utf8_path, &archive_name)?;
             opts.progress.set_entry(&archive_name);
             opts.progress.inc(meta.len());
@@ -362,9 +375,7 @@ pub fn list_tar_entries<R: std::io::Read>(
 
 /// Count entries and sum uncompressed sizes in a tar archive.
 /// Shared by every tar-based `info` function.
-pub fn count_tar_entries<R: std::io::Read>(
-    archive: &mut tar::Archive<R>,
-) -> Result<(usize, u64)> {
+pub fn count_tar_entries<R: std::io::Read>(archive: &mut tar::Archive<R>) -> Result<(usize, u64)> {
     let mut entry_count: usize = 0;
     let mut total_uncompressed: u64 = 0;
     for entry in archive.entries()? {
@@ -466,10 +477,7 @@ pub fn is_existing_newer(path: &Utf8Path, entry_mtime: u64) -> Result<bool> {
 /// files, then build a [`GlobSet`].
 ///
 /// Used by Compress, Decompress, and List commands.
-pub fn build_excludes(
-    patterns: Vec<String>,
-    pattern_files: &[Utf8PathBuf],
-) -> Result<GlobSet> {
+pub fn build_excludes(patterns: Vec<String>, pattern_files: &[Utf8PathBuf]) -> Result<GlobSet> {
     let mut all = patterns;
     for path in pattern_files {
         all.extend(read_patterns_from_file(path)?);
@@ -530,9 +538,21 @@ pub fn collect_compress_paths(
             if opts.no_recursion {
                 paths.push(format!("{name}/"));
             } else if opts.exclude_vcs_ignores {
-                collect_dir_paths_vcs(input, name, &opts.excludes, opts.follow_symlinks, &mut paths)?;
+                collect_dir_paths_vcs(
+                    input,
+                    name,
+                    &opts.excludes,
+                    opts.follow_symlinks,
+                    &mut paths,
+                )?;
             } else {
-                collect_dir_paths(input, name, &opts.excludes, opts.follow_symlinks, &mut paths)?;
+                collect_dir_paths(
+                    input,
+                    name,
+                    &opts.excludes,
+                    opts.follow_symlinks,
+                    &mut paths,
+                )?;
             }
         } else {
             paths.push(name.to_owned());
@@ -549,8 +569,7 @@ fn collect_dir_paths(
     out: &mut Vec<String>,
 ) -> Result<()> {
     out.push(format!("{prefix}/"));
-    let mut entries: Vec<_> =
-        fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut entries: Vec<_> = fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
@@ -706,10 +725,7 @@ mod tests {
             s.map(|s| s.is_match("node_modules/package.json")),
             Some(true),
         );
-        assert_eq!(
-            s.map(|s| s.is_match("src/node_modules/foo")),
-            Some(true),
-        );
+        assert_eq!(s.map(|s| s.is_match("src/node_modules/foo")), Some(true),);
         assert_eq!(s.map(|s| s.is_match("src/other")), Some(false));
     }
 }
