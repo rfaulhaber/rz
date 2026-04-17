@@ -102,5 +102,7 @@ impl DecompressOpts<'_> {
             && !self.keep_newer
             && !self.no_directory
             && self.backup_suffix.is_none()
+            && self.strip_components == 0
+            && !self.preserve_permissions
     }
 }

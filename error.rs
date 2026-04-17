@@ -44,4 +44,11 @@ pub enum Error {
 
     #[error("cannot infer format from stdin; specify --format")]
     CannotInferFormatStdin,
+
+    #[error("path traversal detected in archive entry: {0}")]
+    PathTraversal(String),
+
+    #[error("zstd (pure Rust) only supports --level 0 (uncompressed); \
+             custom compression levels require a build with C bindings")]
+    ZstdLevelUnsupported,
 }

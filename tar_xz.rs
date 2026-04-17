@@ -111,6 +111,10 @@ pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, op
 }
 
 #[cfg(not(feature = "xz2"))]
+/// **Memory note:** `lzma-rs` does not provide a streaming decoder, so the
+/// entire decompressed tar archive is buffered in RAM.  For large archives
+/// this can require significant memory.  Enable the `xz2` feature for a
+/// streaming C-backed decoder that avoids this limitation.
 pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
     let mut tar_data = Vec::new();
     lzma_rs::xz_decompress(&mut BufReader::new(reader), &mut tar_data)
@@ -178,7 +182,9 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 /// Open a `.tar.xz` file and return a tar archive with xz decompression.
 ///
 /// With the `xz2` feature this streams through the C-backed liblzma decoder.
-/// Without it, the entire archive is decompressed into memory via `lzma-rs`.
+/// Without it, the **entire decompressed archive** is buffered in memory via
+/// `lzma-rs` (which only provides a one-shot API).  This means a 100 MB
+/// `.tar.xz` that expands to 2 GB will require 2 GB of RAM.
 #[cfg(feature = "xz2")]
 fn open_archive(
     input: &Utf8Path,

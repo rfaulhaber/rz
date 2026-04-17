@@ -64,6 +64,13 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
         sevenz_rust2::decompress_file(input, output)?;
     } else {
         sevenz_rust2::decompress_file_with_extract_fn(input, output, |entry, reader, dest| {
+            // Reject entries that attempt path traversal.
+            crate::filter::safe_entry_path(&entry.name)
+                .map_err(|e| sevenz_rust2::Error::Io(
+                    std::io::Error::other(e.to_string()),
+                    entry.name.clone().into(),
+                ))?;
+
             if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
                 return Ok(true);
             }
@@ -91,12 +98,13 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                     return Ok(true);
                 } else if !opts.force {
                     let utf8 = Utf8PathBuf::from(out_path.display().to_string());
+                    let err = Error::FileExists(utf8);
                     return Err(sevenz_rust2::Error::Io(
                         std::io::Error::new(
                             std::io::ErrorKind::AlreadyExists,
-                            format!("file already exists: {utf8} (use --force to overwrite)"),
+                            err.to_string(),
                         ),
-                        utf8.into_string().into(),
+                        err.to_string().into(),
                     ));
                 }
             }
@@ -122,14 +130,31 @@ pub fn decompress_to_writer<W: std::io::Write>(
     writer: &mut W,
     opts: &DecompressOpts<'_>,
 ) -> Result<()> {
+    if opts.strip_components > 0 {
+        return Err(Error::StripComponentsUnsupported("7z".to_owned()));
+    }
     sevenz_rust2::decompress_file_with_extract_fn(input, ".", |entry, reader, _dest| {
+        // Reject entries that attempt path traversal.
+        crate::filter::safe_entry_path(&entry.name)
+            .map_err(|e| sevenz_rust2::Error::Io(
+                std::io::Error::other(e.to_string()),
+                entry.name.clone().into(),
+            ))?;
+
         if entry.is_directory {
             return Ok(true);
         }
         if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
             return Ok(true);
         }
-        opts.progress.set_entry(&entry.name);
+        if opts.no_directory {
+            let display_name = Utf8Path::new(&entry.name)
+                .file_name()
+                .unwrap_or(&entry.name);
+            opts.progress.set_entry(display_name);
+        } else {
+            opts.progress.set_entry(&entry.name);
+        }
         std::io::copy(reader, writer)
             .map_err(|e| sevenz_rust2::Error::Io(e, "decompress to writer".into()))?;
         Ok(true) // skip default extraction

@@ -381,16 +381,15 @@ fn run(cli: Cli) -> Result<()> {
             if let Some(ref field) = sort {
                 match field {
                     SortField::Name => entries.sort_by(|a, b| a.path.cmp(&b.path)),
-                    SortField::Size => entries.sort_by(|a, b| a.size.cmp(&b.size)),
-                    SortField::Date => entries.sort_by(|a, b| a.mtime.cmp(&b.mtime)),
+                    SortField::Size => entries.sort_by_key(|e| e.size),
+                    SortField::Date => entries.sort_by_key(|e| e.mtime),
                 }
             }
 
+            let includes = globset::GlobSet::empty();
             let mut stdout = std::io::stdout().lock();
             for entry in &entries {
-                if !excludes.is_empty()
-                    && excludes.is_match(entry.path.as_str().trim_end_matches('/'))
-                {
+                if !filter::should_extract(entry.path.as_str(), &includes, &excludes) {
                     continue;
                 }
                 if long {

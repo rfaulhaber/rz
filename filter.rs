@@ -112,6 +112,173 @@ pub fn vcs_walker(dir: &Utf8Path, follow_symlinks: bool) -> ignore::Walk {
         .build()
 }
 
+// ── Shared directory walker ────────────────────────────────────────────────
+
+/// An entry discovered during a directory walk.
+pub struct WalkEntry {
+    /// Path this entry will have inside the archive.
+    pub archive_name: String,
+    /// Absolute path on the filesystem.
+    pub fs_path: Utf8PathBuf,
+    /// Whether this entry is a directory.
+    pub is_dir: bool,
+}
+
+/// Walk a directory tree and call `visit` for each entry, applying exclude
+/// filters and honouring `follow_symlinks`.
+///
+/// When `opts.exclude_vcs_ignores` is set the walk respects `.gitignore`
+/// rules via the `ignore` crate.  Entries are yielded in sorted order for
+/// deterministic archive output.
+///
+/// This is the single source of walking logic used by tar compress, zip
+/// compress, 7z compress, and dry-run collection.
+pub fn walk_dir<F>(
+    dir: &Utf8Path,
+    prefix: &str,
+    opts: &CompressOpts<'_>,
+    visit: &mut F,
+) -> Result<()>
+where
+    F: FnMut(WalkEntry) -> Result<()>,
+{
+    if opts.exclude_vcs_ignores {
+        walk_dir_vcs(dir, prefix, &opts.excludes, opts.follow_symlinks, visit)
+    } else {
+        // Yield the root directory entry, then recurse.
+        visit(WalkEntry {
+            archive_name: prefix.to_owned(),
+            fs_path: dir.to_owned(),
+            is_dir: true,
+        })?;
+        walk_dir_simple(dir, prefix, &opts.excludes, opts.follow_symlinks, visit)
+    }
+}
+
+/// Standard directory walk (no VCS-ignore awareness).
+fn walk_dir_simple<F>(
+    dir: &Utf8Path,
+    prefix: &str,
+    excludes: &GlobSet,
+    follow_symlinks: bool,
+    visit: &mut F,
+) -> Result<()>
+where
+    F: FnMut(WalkEntry) -> Result<()>,
+{
+    let mut entries: Vec<_> = fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let entry_path = entry.path();
+        let file_name = entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
+        let archive_name = format!("{prefix}/{file_name}");
+
+        if excludes.is_match(&archive_name) {
+            continue;
+        }
+
+        let entry_str = entry_path
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
+        let utf8_path = Utf8Path::new(entry_str);
+
+        let is_dir = if follow_symlinks {
+            fs_err::metadata(utf8_path)?.is_dir()
+        } else {
+            entry.file_type()?.is_dir()
+        };
+
+        visit(WalkEntry {
+            archive_name: archive_name.clone(),
+            fs_path: utf8_path.to_owned(),
+            is_dir,
+        })?;
+
+        if is_dir {
+            walk_dir_simple(utf8_path, &archive_name, excludes, follow_symlinks, visit)?;
+        }
+    }
+    Ok(())
+}
+
+/// Walk a directory using the `ignore` crate to respect `.gitignore` rules.
+fn walk_dir_vcs<F>(
+    dir: &Utf8Path,
+    prefix: &str,
+    excludes: &GlobSet,
+    follow_symlinks: bool,
+    visit: &mut F,
+) -> Result<()>
+where
+    F: FnMut(WalkEntry) -> Result<()>,
+{
+    for result in vcs_walker(dir, follow_symlinks) {
+        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
+        let fs_path = entry.path();
+
+        let relative = fs_path
+            .strip_prefix(dir.as_std_path())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        // Root directory entry.
+        if relative.as_os_str().is_empty() {
+            visit(WalkEntry {
+                archive_name: prefix.to_owned(),
+                fs_path: dir.to_owned(),
+                is_dir: true,
+            })?;
+            continue;
+        }
+
+        let rel_str = relative
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(relative.display().to_string()))?;
+        let archive_name = format!("{prefix}/{rel_str}");
+
+        if excludes.is_match(&archive_name) {
+            continue;
+        }
+
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let utf8_str = fs_path
+            .to_str()
+            .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?;
+
+        visit(WalkEntry {
+            archive_name,
+            fs_path: Utf8PathBuf::from(utf8_str),
+            is_dir,
+        })?;
+    }
+    Ok(())
+}
+
+// ── Path safety ────────────────────────────────────────────────────────────
+
+/// Validate that an archive entry path does not escape the output directory.
+///
+/// Rejects paths containing `..` components to prevent "zip-slip" style
+/// path-traversal attacks (CVE-2018-1002200).  The check is purely lexical —
+/// it does not touch the filesystem — so it works before any directories are
+/// created.
+pub fn safe_entry_path(name: &str) -> Result<()> {
+    // Check for ".." components that could escape the output directory.
+    for component in Utf8Path::new(name).components() {
+        if matches!(component, camino::Utf8Component::ParentDir) {
+            return Err(Error::PathTraversal(name.to_owned()));
+        }
+    }
+    // Also reject absolute paths.
+    if Utf8Path::new(name).is_absolute() {
+        return Err(Error::PathTraversal(name.to_owned()));
+    }
+    Ok(())
+}
+
 // ── Symlink helper ──────────────────────────────────────────────────────────
 
 /// Read file metadata, optionally following symlinks.
@@ -138,6 +305,9 @@ pub fn extract_tar_to_writer<R: std::io::Read, W: std::io::Write>(
         let orig_path = Utf8PathBuf::try_from(orig_path.into_owned())
             .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
 
+        // Reject entries that attempt path traversal.
+        safe_entry_path(orig_path.as_str())?;
+
         if !should_extract(orig_path.as_str(), &opts.includes, &opts.excludes) {
             continue;
         }
@@ -162,7 +332,8 @@ pub fn extract_tar_to_writer<R: std::io::Read, W: std::io::Write>(
         };
 
         opts.progress.set_entry(&display_name);
-        std::io::copy(&mut entry, writer)?;
+        let written = std::io::copy(&mut entry, writer)?;
+        opts.progress.inc(written);
     }
     Ok(())
 }
@@ -190,9 +361,7 @@ pub fn verify_tar_entries<R: std::io::Read>(
 /// Walk a directory tree and append entries to a tar builder, skipping paths
 /// that match the exclude set.  Reports progress per file via `progress`.
 ///
-/// When `opts.exclude_vcs_ignores` is set, uses the `ignore` crate's
-/// `WalkBuilder` to respect `.gitignore` rules.  When `opts.no_recursion` is
-/// set, only the directory entry itself is added (no contents).
+/// Delegates to [`walk_dir`] for the actual directory traversal.
 pub fn append_dir_filtered<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     dir: &Utf8Path,
@@ -204,124 +373,17 @@ pub fn append_dir_filtered<W: std::io::Write>(
         return Ok(());
     }
 
-    if opts.exclude_vcs_ignores {
-        return append_dir_vcs(builder, dir, prefix, opts);
-    }
-
-    append_dir_simple(
-        builder,
-        dir,
-        prefix,
-        &opts.excludes,
-        opts.follow_symlinks,
-        opts.progress,
-    )
-}
-
-/// Standard directory walk (no VCS-ignore awareness).
-fn append_dir_simple<W: std::io::Write>(
-    builder: &mut tar::Builder<W>,
-    dir: &Utf8Path,
-    prefix: &str,
-    excludes: &GlobSet,
-    follow_symlinks: bool,
-    progress: &dyn ProgressReport,
-) -> Result<()> {
-    builder.append_dir(prefix, dir)?;
-
-    let mut entries: Vec<_> = fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let entry_path = entry.path();
-        let file_name = entry_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
-        let archive_name = format!("{prefix}/{file_name}");
-
-        if excludes.is_match(&archive_name) {
-            continue;
-        }
-
-        let entry_str = entry_path
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
-        let utf8_path = Utf8Path::new(entry_str);
-
-        let is_dir = if follow_symlinks {
-            fs_err::metadata(utf8_path)?.is_dir()
+    walk_dir(dir, prefix, opts, &mut |entry| {
+        if entry.is_dir {
+            builder.append_dir(&entry.archive_name, &entry.fs_path)?;
         } else {
-            entry.file_type()?.is_dir()
-        };
-
-        if is_dir {
-            append_dir_simple(
-                builder,
-                utf8_path,
-                &archive_name,
-                excludes,
-                follow_symlinks,
-                progress,
-            )?;
-        } else {
-            let meta = input_metadata(utf8_path, follow_symlinks)?;
-            builder.append_path_with_name(utf8_path, &archive_name)?;
-            progress.set_entry(&archive_name);
-            progress.inc(meta.len());
-        }
-    }
-    Ok(())
-}
-
-/// Walk a directory using the `ignore` crate to respect `.gitignore` rules,
-/// and append matching entries to a tar builder.
-fn append_dir_vcs<W: std::io::Write>(
-    builder: &mut tar::Builder<W>,
-    dir: &Utf8Path,
-    prefix: &str,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
-    for result in vcs_walker(dir, opts.follow_symlinks) {
-        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
-        let fs_path = entry.path();
-
-        let relative = fs_path
-            .strip_prefix(dir.as_std_path())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        // Root directory entry.
-        if relative.as_os_str().is_empty() {
-            builder.append_dir(prefix, dir)?;
-            continue;
-        }
-
-        let rel_str = relative
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(relative.display().to_string()))?;
-        let archive_name = format!("{prefix}/{rel_str}");
-
-        if opts.excludes.is_match(&archive_name) {
-            continue;
-        }
-
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-
-        if is_dir {
-            builder.append_dir(&archive_name, fs_path)?;
-        } else {
-            let utf8_path = Utf8Path::new(
-                fs_path
-                    .to_str()
-                    .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
-            );
-            let meta = input_metadata(utf8_path, opts.follow_symlinks)?;
-            builder.append_path_with_name(utf8_path, &archive_name)?;
-            opts.progress.set_entry(&archive_name);
+            let meta = input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+            builder.append_path_with_name(&entry.fs_path, &entry.archive_name)?;
+            opts.progress.set_entry(&entry.archive_name);
             opts.progress.inc(meta.len());
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Append each input (file or directory) to a tar builder, respecting
@@ -401,6 +463,9 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         let orig_path = Utf8PathBuf::try_from(orig_path.into_owned())
             .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
 
+        // Reject entries that attempt path traversal.
+        safe_entry_path(orig_path.as_str())?;
+
         // Include/exclude check against the original (pre-strip) path.
         if !should_extract(orig_path.as_str(), &opts.includes, &opts.excludes) {
             continue;
@@ -454,7 +519,9 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         }
 
         opts.progress.set_entry(dest_path.as_str());
+        let size = entry.header().size().unwrap_or(0);
         entry.unpack(&dest)?;
+        opts.progress.inc(size);
     }
     Ok(())
 }
@@ -523,6 +590,8 @@ pub fn read_paths_from_file(path: &Utf8Path) -> Result<Vec<Utf8PathBuf>> {
 
 /// Collect all file paths that would be added to an archive from the given
 /// inputs, honouring exclude patterns.  Used by `--dry-run` on compress.
+///
+/// Delegates to [`walk_dir`] for directory traversal.
 pub fn collect_compress_paths(
     inputs: &[Utf8PathBuf],
     opts: &CompressOpts<'_>,
@@ -537,111 +606,21 @@ pub fn collect_compress_paths(
         if meta.is_dir() {
             if opts.no_recursion {
                 paths.push(format!("{name}/"));
-            } else if opts.exclude_vcs_ignores {
-                collect_dir_paths_vcs(
-                    input,
-                    name,
-                    &opts.excludes,
-                    opts.follow_symlinks,
-                    &mut paths,
-                )?;
             } else {
-                collect_dir_paths(
-                    input,
-                    name,
-                    &opts.excludes,
-                    opts.follow_symlinks,
-                    &mut paths,
-                )?;
+                walk_dir(input, name, opts, &mut |entry| {
+                    if entry.is_dir {
+                        paths.push(format!("{}/", entry.archive_name));
+                    } else {
+                        paths.push(entry.archive_name);
+                    }
+                    Ok(())
+                })?;
             }
         } else {
             paths.push(name.to_owned());
         }
     }
     Ok(paths)
-}
-
-fn collect_dir_paths(
-    dir: &Utf8Path,
-    prefix: &str,
-    excludes: &GlobSet,
-    follow_symlinks: bool,
-    out: &mut Vec<String>,
-) -> Result<()> {
-    out.push(format!("{prefix}/"));
-    let mut entries: Vec<_> = fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in entries {
-        let entry_path = entry.path();
-        let file_name = entry_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
-        let archive_name = format!("{prefix}/{file_name}");
-
-        if excludes.is_match(&archive_name) {
-            continue;
-        }
-
-        let entry_str = entry_path
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
-        let utf8_path = Utf8Path::new(entry_str);
-
-        let is_dir = if follow_symlinks {
-            fs_err::metadata(utf8_path)?.is_dir()
-        } else {
-            entry.file_type()?.is_dir()
-        };
-
-        if is_dir {
-            collect_dir_paths(utf8_path, &archive_name, excludes, follow_symlinks, out)?;
-        } else {
-            out.push(archive_name);
-        }
-    }
-    Ok(())
-}
-
-/// Collect paths using the `ignore` crate to respect `.gitignore` rules.
-fn collect_dir_paths_vcs(
-    dir: &Utf8Path,
-    prefix: &str,
-    excludes: &GlobSet,
-    follow_symlinks: bool,
-    out: &mut Vec<String>,
-) -> Result<()> {
-    for result in vcs_walker(dir, follow_symlinks) {
-        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
-        let fs_path = entry.path();
-
-        let relative = fs_path
-            .strip_prefix(dir.as_std_path())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        if relative.as_os_str().is_empty() {
-            out.push(format!("{prefix}/"));
-            continue;
-        }
-
-        let rel_str = relative
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(relative.display().to_string()))?;
-        let archive_name = format!("{prefix}/{rel_str}");
-
-        if excludes.is_match(&archive_name) {
-            continue;
-        }
-
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-        if is_dir {
-            out.push(format!("{archive_name}/"));
-        } else {
-            out.push(archive_name);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

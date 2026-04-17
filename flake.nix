@@ -16,7 +16,6 @@
     ...
   }: let
     projectName = "rz";
-    cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
   in
     flake-parts.lib.mkFlake {inherit inputs;} {
       imports = [];
@@ -50,7 +49,7 @@
             pkgs.rustPlatform.buildRustPackage {
               inherit features;
               pname = projectName;
-              version = cargoToml.package.version;
+              version = let file = builtins.readFile ./Cargo.toml |> builtins.fromTOML; in file.package.version;
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
             };

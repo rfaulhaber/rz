@@ -207,7 +207,7 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     Zip,
     Tar,    // tar (no compression)

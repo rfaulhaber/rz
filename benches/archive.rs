@@ -22,7 +22,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use globset::GlobSet;
 
 use rz::progress::NoProgress;
-use rz::{seven_z, tar, tar_gz, tar_xz, tar_zst, zip, CompressOpts, DecompressOpts};
+use rz::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -68,11 +68,11 @@ fn collect_paths(dir: &std::path::Path) -> Vec<Utf8PathBuf> {
 /// pay for setup.
 struct Fixture {
     /// Source files directory (kept alive via TempDir).
-    _source_dir: tempfile::TempDir,
+    source_dir: tempfile::TempDir,
     /// Sorted paths to source files.
     sources: Vec<Utf8PathBuf>,
     /// Directory containing pre-built archives.
-    _archive_dir: tempfile::TempDir,
+    archive_dir: tempfile::TempDir,
     /// UTF-8 path to archive directory.
     archive_root: Utf8PathBuf,
 }
@@ -95,9 +95,9 @@ impl Fixture {
         seven_z::compress(&sources, &archive_root.join("test.7z"), &opts).unwrap();
 
         Self {
-            _source_dir: source_dir,
+            source_dir,
             sources,
-            _archive_dir: archive_dir,
+            archive_dir,
             archive_root,
         }
     }
@@ -179,10 +179,7 @@ const FORMATS: &[FormatDesc] = &[
 // ── Entry-count parameter sets ──────────────────────────────────────────────
 
 /// (label, num_files, file_size_bytes)
-const SIZES: &[(&str, usize, usize)] = &[
-    ("10x4KB", 10, 4096),
-    ("500x4KB", 500, 4096),
-];
+const SIZES: &[(&str, usize, usize)] = &[("10x4KB", 10, 4096), ("500x4KB", 500, 4096)];
 
 // ── Benchmarks ──────────────────────────────────────────────────────────────
 
@@ -194,15 +191,11 @@ fn bench_info(c: &mut Criterion) {
 
         for fmt in FORMATS {
             let archive = fixture.archive(fmt.filename);
-            group.bench_with_input(
-                BenchmarkId::new(fmt.name, label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        (fmt.info)(archive).unwrap();
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(fmt.name, label), &archive, |b, archive| {
+                b.iter(|| {
+                    (fmt.info)(archive).unwrap();
+                });
+            });
         }
     }
 
@@ -217,15 +210,11 @@ fn bench_list(c: &mut Criterion) {
 
         for fmt in FORMATS {
             let archive = fixture.archive(fmt.filename);
-            group.bench_with_input(
-                BenchmarkId::new(fmt.name, label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        (fmt.list)(archive).unwrap();
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(fmt.name, label), &archive, |b, archive| {
+                b.iter(|| {
+                    (fmt.list)(archive).unwrap();
+                });
+            });
         }
     }
 
@@ -240,15 +229,11 @@ fn bench_test(c: &mut Criterion) {
 
         for fmt in FORMATS {
             let archive = fixture.archive(fmt.filename);
-            group.bench_with_input(
-                BenchmarkId::new(fmt.name, label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        (fmt.test)(archive, &NoProgress).unwrap();
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(fmt.name, label), &archive, |b, archive| {
+                b.iter(|| {
+                    (fmt.test)(archive, &NoProgress).unwrap();
+                });
+            });
         }
     }
 
@@ -265,10 +250,8 @@ fn bench_compress(c: &mut Criterion) {
             group.bench_function(BenchmarkId::new(fmt.name, label), |b| {
                 b.iter_with_large_drop(|| {
                     let out_dir = tempfile::tempdir().unwrap();
-                    let out_path = Utf8PathBuf::from_path_buf(
-                        out_dir.path().join(fmt.filename),
-                    )
-                    .unwrap();
+                    let out_path =
+                        Utf8PathBuf::from_path_buf(out_dir.path().join(fmt.filename)).unwrap();
                     (fmt.compress)(&fixture.sources, &out_path, &compress_opts()).unwrap();
                     out_dir // returned so drop (cleanup) isn't timed
                 });
@@ -287,19 +270,15 @@ fn bench_decompress(c: &mut Criterion) {
 
         for fmt in FORMATS {
             let archive = fixture.archive(fmt.filename);
-            group.bench_with_input(
-                BenchmarkId::new(fmt.name, label),
-                &archive,
-                |b, archive| {
-                    b.iter_with_large_drop(|| {
-                        let out_dir = tempfile::tempdir().unwrap();
-                        let out_path =
-                            Utf8PathBuf::from_path_buf(out_dir.path().to_path_buf()).unwrap();
-                        (fmt.decompress)(archive, &out_path, &decompress_opts()).unwrap();
-                        out_dir
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(fmt.name, label), &archive, |b, archive| {
+                b.iter_with_large_drop(|| {
+                    let out_dir = tempfile::tempdir().unwrap();
+                    let out_path =
+                        Utf8PathBuf::from_path_buf(out_dir.path().to_path_buf()).unwrap();
+                    (fmt.decompress)(archive, &out_path, &decompress_opts()).unwrap();
+                    out_dir
+                });
+            });
         }
     }
 
@@ -319,58 +298,34 @@ fn bench_decompress_to_sink(c: &mut Criterion) {
         // zip
         {
             let archive = fixture.archive("test.zip");
-            group.bench_with_input(
-                BenchmarkId::new("zip", label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        zip::decompress_to_writer(
-                            archive,
-                            &mut io::sink(),
-                            &decompress_opts(),
-                        )
+            group.bench_with_input(BenchmarkId::new("zip", label), &archive, |b, archive| {
+                b.iter(|| {
+                    zip::decompress_to_writer(archive, &mut io::sink(), &decompress_opts())
                         .unwrap();
-                    });
-                },
-            );
+                });
+            });
         }
 
         // tar
         {
             let archive = fixture.archive("test.tar");
-            group.bench_with_input(
-                BenchmarkId::new("tar", label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        tar::decompress_to_writer(
-                            archive,
-                            &mut io::sink(),
-                            &decompress_opts(),
-                        )
+            group.bench_with_input(BenchmarkId::new("tar", label), &archive, |b, archive| {
+                b.iter(|| {
+                    tar::decompress_to_writer(archive, &mut io::sink(), &decompress_opts())
                         .unwrap();
-                    });
-                },
-            );
+                });
+            });
         }
 
         // tar.gz
         {
             let archive = fixture.archive("test.tar.gz");
-            group.bench_with_input(
-                BenchmarkId::new("tar.gz", label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        tar_gz::decompress_to_writer(
-                            archive,
-                            &mut io::sink(),
-                            &decompress_opts(),
-                        )
+            group.bench_with_input(BenchmarkId::new("tar.gz", label), &archive, |b, archive| {
+                b.iter(|| {
+                    tar_gz::decompress_to_writer(archive, &mut io::sink(), &decompress_opts())
                         .unwrap();
-                    });
-                },
-            );
+                });
+            });
         }
 
         // tar.zst
@@ -381,12 +336,8 @@ fn bench_decompress_to_sink(c: &mut Criterion) {
                 &archive,
                 |b, archive| {
                     b.iter(|| {
-                        tar_zst::decompress_to_writer(
-                            archive,
-                            &mut io::sink(),
-                            &decompress_opts(),
-                        )
-                        .unwrap();
+                        tar_zst::decompress_to_writer(archive, &mut io::sink(), &decompress_opts())
+                            .unwrap();
                     });
                 },
             );
@@ -395,39 +346,23 @@ fn bench_decompress_to_sink(c: &mut Criterion) {
         // tar.xz
         {
             let archive = fixture.archive("test.tar.xz");
-            group.bench_with_input(
-                BenchmarkId::new("tar.xz", label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        tar_xz::decompress_to_writer(
-                            archive,
-                            &mut io::sink(),
-                            &decompress_opts(),
-                        )
+            group.bench_with_input(BenchmarkId::new("tar.xz", label), &archive, |b, archive| {
+                b.iter(|| {
+                    tar_xz::decompress_to_writer(archive, &mut io::sink(), &decompress_opts())
                         .unwrap();
-                    });
-                },
-            );
+                });
+            });
         }
 
         // 7z
         {
             let archive = fixture.archive("test.7z");
-            group.bench_with_input(
-                BenchmarkId::new("7z", label),
-                &archive,
-                |b, archive| {
-                    b.iter(|| {
-                        seven_z::decompress_to_writer(
-                            archive,
-                            &mut io::sink(),
-                            &decompress_opts(),
-                        )
+            group.bench_with_input(BenchmarkId::new("7z", label), &archive, |b, archive| {
+                b.iter(|| {
+                    seven_z::decompress_to_writer(archive, &mut io::sink(), &decompress_opts())
                         .unwrap();
-                    });
-                },
-            );
+                });
+            });
         }
     }
 

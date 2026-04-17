@@ -12,6 +12,12 @@ use crate::filter;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 /// Block size for parallel gzip compression (1 MiB).
+///
+/// **Memory note:** the parallel compress path buffers the entire uncompressed
+/// tar archive in RAM before splitting it into blocks.  For very large inputs
+/// (multi-GB), peak memory usage will be at least the uncompressed archive size.
+/// This is a deliberate trade-off: parallel block compression yields significant
+/// throughput gains at the cost of higher memory use.
 const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 
 // ── Compress ──────────────────────────────────────────────────────────────────

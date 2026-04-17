@@ -57,3 +57,12 @@ unimplemented = "deny"
 dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
+
+[package.metadata.release]
+allow-branch = ["main"]
+sign-commit = true
+sign-tag = true
+push-remote = "origin"
+tag-prefix = "v"
+tag-name = "{{prefix}}{{version}}"
+publish = true

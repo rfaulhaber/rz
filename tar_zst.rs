@@ -5,11 +5,17 @@ use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 use ruzstd::encoding::CompressionLevel;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::filter;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 /// Block size for parallel zstd compression (1 MiB).
+///
+/// **Memory note:** the parallel compress path buffers the entire uncompressed
+/// tar archive in RAM before splitting it into blocks.  For very large inputs
+/// (multi-GB), peak memory usage will be at least the uncompressed archive size.
+/// This is a deliberate trade-off: parallel block compression yields significant
+/// throughput gains at the cost of higher memory use.
 const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 
 // ── Compress ──────────────────────────────────────────────────────────────────
@@ -19,6 +25,8 @@ pub fn compress(
     output: &Utf8Path,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let level = resolve_zstd_level(opts.level)?;
+
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
@@ -26,11 +34,6 @@ pub fn compress(
         filter::append_inputs(&mut builder, inputs, opts)?;
         builder.into_inner()?;
     }
-
-    let level = match opts.level {
-        Some(0) => CompressionLevel::Uncompressed,
-        _ => CompressionLevel::Fastest,
-    };
 
     let file = fs_err::File::create(output)?;
     let mut buf = BufWriter::new(file);
@@ -48,6 +51,8 @@ pub fn compress_to_writer<W: std::io::Write>(
     mut writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let level = resolve_zstd_level(opts.level)?;
+
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
@@ -55,11 +60,6 @@ pub fn compress_to_writer<W: std::io::Write>(
         filter::append_inputs(&mut builder, inputs, opts)?;
         builder.into_inner()?;
     }
-
-    let level = match opts.level {
-        Some(0) => CompressionLevel::Uncompressed,
-        _ => CompressionLevel::Fastest,
-    };
 
     parallel_zst_compress(&tar_data, &mut writer, level)?;
     Ok(())
@@ -156,6 +156,19 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Map an optional user-supplied compression level to a `ruzstd` level.
+///
+/// The pure-Rust `ruzstd` encoder only supports `Uncompressed` and `Fastest`.
+/// Rather than silently ignoring the user's level, we accept `None` (default →
+/// Fastest) and `Some(0)` (→ Uncompressed) and reject everything else.
+fn resolve_zstd_level(level: Option<u32>) -> Result<CompressionLevel> {
+    match level {
+        None => Ok(CompressionLevel::Fastest),
+        Some(0) => Ok(CompressionLevel::Uncompressed),
+        Some(_) => Err(Error::ZstdLevelUnsupported),
+    }
+}
 
 /// Open a `.tar.zst` file and return a multi-frame zstd decoder.
 fn open_decoder(input: &Utf8Path) -> Result<MultiFrameDecoder<BufReader<fs_err::File>>> {

@@ -30,10 +30,8 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
         } else if meta.is_dir() {
             if opts.no_recursion {
                 zip.add_directory(format!("{name}/"), options)?;
-            } else if opts.exclude_vcs_ignores {
-                add_dir_vcs(&mut zip, input, name, options, opts)?;
             } else {
-                add_dir_recursive(&mut zip, input, name, options, opts)?;
+                add_dir_walked(&mut zip, input, name, options, opts)?;
             }
         } else {
             zip.start_file(name, options)?;
@@ -49,115 +47,34 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     Ok(())
 }
 
-/// Recursively add a directory and its contents to the zip archive.
-fn add_dir_recursive(
+/// Walk a directory using [`filter::walk_dir`] and add entries to a zip archive.
+/// Handles symlinks, regular files, and subdirectories.
+fn add_dir_walked(
     zip: &mut ZipWriter<fs_err::File>,
     dir: &Utf8Path,
     prefix: &str,
     options: SimpleFileOptions,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
-    zip.add_directory(format!("{prefix}/"), options)?;
-
-    // Sort entries for deterministic archive output.
-    let mut dir_entries: Vec<_> =
-        fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
-    dir_entries.sort_by_key(|e| e.file_name());
-
-    for entry in dir_entries {
-        let entry_path = entry.path();
-        let file_name = entry_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
-        let entry_str = entry_path
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(entry_path.display().to_string()))?;
-        let child = Utf8Path::new(entry_str);
-        let name = format!("{prefix}/{file_name}");
-
-        if opts.excludes.is_match(&name) {
-            continue;
-        }
-
-        let file_type = entry.file_type()?;
-        let is_symlink = !opts.follow_symlinks && file_type.is_symlink();
-        let is_dir = if opts.follow_symlinks {
-            fs_err::metadata(child)?.is_dir()
-        } else {
-            file_type.is_dir()
-        };
+    filter::walk_dir(dir, prefix, opts, &mut |entry| {
+        let is_symlink = !opts.follow_symlinks
+            && fs_err::symlink_metadata(&entry.fs_path)?
+                .file_type()
+                .is_symlink();
 
         if is_symlink {
-            write_symlink_entry(zip, child, &name, options, opts)?;
-        } else if is_dir {
-            add_dir_recursive(zip, child, &name, options, opts)?;
+            write_symlink_entry(zip, &entry.fs_path, &entry.archive_name, options, opts)?;
+        } else if entry.is_dir {
+            zip.add_directory(format!("{}/", entry.archive_name), options)?;
         } else {
-            zip.start_file(&name, options)?;
-            let mut f = fs_err::File::open(child)?;
+            zip.start_file(&entry.archive_name, options)?;
+            let mut f = fs_err::File::open(&entry.fs_path)?;
             let size = io::copy(&mut f, zip)?;
-            opts.progress.set_entry(&name);
+            opts.progress.set_entry(&entry.archive_name);
             opts.progress.inc(size);
         }
-    }
-    Ok(())
-}
-
-/// Add a directory to a zip archive using the `ignore` crate to respect
-/// `.gitignore` rules.
-fn add_dir_vcs(
-    zip: &mut ZipWriter<fs_err::File>,
-    dir: &Utf8Path,
-    prefix: &str,
-    options: SimpleFileOptions,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
-    for result in filter::vcs_walker(dir, opts.follow_symlinks) {
-        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
-        let fs_path = entry.path();
-
-        let relative = fs_path
-            .strip_prefix(dir.as_std_path())
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-
-        if relative.as_os_str().is_empty() {
-            zip.add_directory(format!("{prefix}/"), options)?;
-            continue;
-        }
-
-        let rel_str = relative
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(relative.display().to_string()))?;
-        let archive_name = format!("{prefix}/{rel_str}");
-
-        if opts.excludes.is_match(&archive_name) {
-            continue;
-        }
-
-        let file_type = entry.file_type();
-        let is_dir = file_type.is_some_and(|ft| ft.is_dir());
-        let is_symlink =
-            !opts.follow_symlinks && file_type.is_some_and(|ft| ft.is_symlink());
-
-        let utf8_path = Utf8Path::new(
-            fs_path
-                .to_str()
-                .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?,
-        );
-
-        if is_symlink {
-            write_symlink_entry(zip, utf8_path, &archive_name, options, opts)?;
-        } else if is_dir {
-            zip.add_directory(format!("{archive_name}/"), options)?;
-        } else {
-            zip.start_file(&archive_name, options)?;
-            let mut f = fs_err::File::open(utf8_path)?;
-            let size = io::copy(&mut f, zip)?;
-            opts.progress.set_entry(&archive_name);
-            opts.progress.inc(size);
-        }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Store a symlink as a symlink entry (POSIX-style, with `S_IFLNK` mode and
@@ -202,6 +119,9 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                 .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
             let mut entry = archive.by_index(i)?;
             let name = Utf8PathBuf::from(entry.name());
+
+            // Reject entries that attempt path traversal.
+            filter::safe_entry_path(name.as_str())?;
 
             if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
                 return Ok(());
@@ -284,6 +204,9 @@ pub fn decompress_to_writer<W: std::io::Write>(
         let mut entry = archive.by_index(i)?;
         let name = Utf8PathBuf::from(entry.name());
 
+        // Reject entries that attempt path traversal.
+        filter::safe_entry_path(name.as_str())?;
+
         if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
             continue;
         }
@@ -337,24 +260,18 @@ pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) ->
 
 pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let file = fs_err::File::open(input)?;
-    let archive = ZipArchive::new(file)?;
-
-    // Use file_names() which reads from the already-parsed central directory
-    // without seeking to each local file header.  by_index_raw() would seek to
-    // every entry's local header — catastrophic for large archives.
-    let entries = archive
-        .file_names()
-        .map(|name| {
-            let is_dir = name.ends_with('/');
-            Entry {
-                path: Utf8PathBuf::from(name),
-                size: 0,
-                mtime: 0,
-                mode: 0,
-                is_dir,
-            }
-        })
-        .collect();
+    let mut archive = ZipArchive::new(file)?;
+    let mut entries = Vec::with_capacity(archive.len());
+    for i in 0..archive.len() {
+        let entry = archive.by_index_raw(i)?;
+        entries.push(Entry {
+            path: Utf8PathBuf::from(entry.name()),
+            size: entry.size(),
+            mtime: entry.last_modified().map(zip_datetime_to_epoch).unwrap_or(0),
+            mode: entry.unix_mode().unwrap_or(0),
+            is_dir: entry.is_dir(),
+        });
+    }
     Ok(entries)
 }
 
