@@ -8,11 +8,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
-pub fn compress(
-    inputs: &[Utf8PathBuf],
-    output: &Utf8Path,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
+pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
     let mut builder = tar::Builder::new(buf);
@@ -52,20 +48,32 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     decompress_from_reader(buf, output, opts)
 }
 
-pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_from_reader<R: std::io::Read>(
+    reader: R,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let mut archive = tar::Archive::new(reader);
     filter::unpack_tar_filtered(&mut archive, output, opts)
 }
 
 // ── Decompress to writer ─────────────────────────────────────────────────────
 
-pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_to_writer<W: std::io::Write>(
+    input: &Utf8Path,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
     decompress_reader_to_writer(buf, writer, opts)
 }
 
-pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(
+    reader: R,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let mut archive = tar::Archive::new(reader);
     filter::extract_tar_to_writer(&mut archive, writer, opts)
 }

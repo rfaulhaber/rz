@@ -1,9 +1,9 @@
 use std::io::{self, BufReader, BufWriter};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
 use rayon::iter::ParallelIterator;
 use rayon::slice::ParallelSlice;
 
@@ -22,11 +22,7 @@ const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
-pub fn compress(
-    inputs: &[Utf8PathBuf],
-    output: &Utf8Path,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
+pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let level = opts.level.unwrap_or(6);
 
     // Buffer the tar archive in memory, then gzip-compress in parallel blocks.
@@ -98,7 +94,11 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     decompress_from_reader(buf, output, opts)
 }
 
-pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_from_reader<R: std::io::Read>(
+    reader: R,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let gz = MultiGzDecoder::new(reader);
     let mut archive = tar::Archive::new(gz);
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
@@ -107,13 +107,21 @@ pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, op
 
 // ── Decompress to writer ─────────────────────────────────────────────────────
 
-pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_to_writer<W: std::io::Write>(
+    input: &Utf8Path,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
     decompress_reader_to_writer(buf, writer, opts)
 }
 
-pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(
+    reader: R,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let gz = MultiGzDecoder::new(reader);
     let mut archive = tar::Archive::new(gz);
     filter::extract_tar_to_writer(&mut archive, writer, opts)

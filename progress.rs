@@ -32,7 +32,9 @@ pub struct NoProgress;
 impl ProgressReport for NoProgress {
     fn set_length(&self, _len: u64) {}
     fn inc(&self, _n: u64) {}
-    fn position(&self) -> u64 { 0 }
+    fn position(&self) -> u64 {
+        0
+    }
     fn set_entry(&self, _name: &str) {}
     fn finish(&self) {}
 }
@@ -73,7 +75,9 @@ impl BarProgress {
     /// Create a hidden progress bar that tracks bytes but renders nothing.
     /// Useful for `--totals` without `--progress`.
     pub fn hidden() -> Self {
-        Self { bar: ProgressBar::hidden() }
+        Self {
+            bar: ProgressBar::hidden(),
+        }
     }
 }
 
@@ -136,4 +140,3 @@ impl ProgressReport for VerboseReport<'_> {
         self.inner.finish();
     }
 }
-

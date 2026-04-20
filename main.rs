@@ -8,9 +8,9 @@ use rz::error::{Error, Result};
 use rz::filter;
 use rz::format::{resolve_compress_format, resolve_input_format};
 use rz::progress::{BarProgress, NoProgress, ProgressReport, VerboseReport};
-use rz::{seven_z, tar, tar_gz, tar_xz, tar_zst, zip, CompressOpts, DecompressOpts};
 #[cfg(feature = "bzip2")]
 use rz::tar_bz2;
+use rz::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -127,9 +127,7 @@ fn run(cli: Cli) -> Result<()> {
             };
 
             if to_stdout && requires_seek(&fmt) {
-                return Err(Error::StdoutNotSupported(
-                    format!("{:?}", fmt),
-                ));
+                return Err(Error::StdoutNotSupported(format!("{:?}", fmt)));
             }
 
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !to_stdout {
@@ -184,15 +182,17 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarBz2 => tar_bz2::compress(&input, &output, &opts)?,
                     Format::SevenZ => seven_z::compress(&input, &output, &opts)?,
                     #[allow(unreachable_patterns)]
-                    other => return Err(Error::UnsupportedFormat(
-                        format!("{:?}", other),
-                    )),
+                    other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
                 }
             }
             progress.finish();
             if totals {
                 let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "Total bytes: {}", format_size(progress.position(), false));
+                let _ = writeln!(
+                    stderr,
+                    "Total bytes: {}",
+                    format_size(progress.position(), false)
+                );
             }
         }
 
@@ -225,9 +225,7 @@ fn run(cli: Cli) -> Result<()> {
             };
 
             if from_stdin && requires_seek(&fmt) {
-                return Err(Error::StdinNotSupported(
-                    format!("{:?}", fmt),
-                ));
+                return Err(Error::StdinNotSupported(format!("{:?}", fmt)));
             }
 
             let excludes = filter::build_excludes(exclude, &exclude_from)?;
@@ -256,7 +254,8 @@ fn run(cli: Cli) -> Result<()> {
                     if !filter::should_extract(entry.path.as_str(), &includes, &excludes) {
                         continue;
                     }
-                    if let Some(stripped) = filter::strip_components(&entry.path, strip_components) {
+                    if let Some(stripped) = filter::strip_components(&entry.path, strip_components)
+                    {
                         let _ = writeln!(stdout, "{stripped}");
                     }
                 }
@@ -306,11 +305,21 @@ fn run(cli: Cli) -> Result<()> {
                     let stdin = std::io::stdin().lock();
                     match fmt {
                         Format::Tar => tar::decompress_reader_to_writer(stdin, &mut stdout, &opts)?,
-                        Format::TarGz => tar_gz::decompress_reader_to_writer(stdin, &mut stdout, &opts)?,
-                        Format::TarZst => tar_zst::decompress_reader_to_writer(std::io::BufReader::new(stdin), &mut stdout, &opts)?,
-                        Format::TarXz => tar_xz::decompress_reader_to_writer(stdin, &mut stdout, &opts)?,
+                        Format::TarGz => {
+                            tar_gz::decompress_reader_to_writer(stdin, &mut stdout, &opts)?
+                        }
+                        Format::TarZst => tar_zst::decompress_reader_to_writer(
+                            std::io::BufReader::new(stdin),
+                            &mut stdout,
+                            &opts,
+                        )?,
+                        Format::TarXz => {
+                            tar_xz::decompress_reader_to_writer(stdin, &mut stdout, &opts)?
+                        }
                         #[cfg(feature = "bzip2")]
-                        Format::TarBz2 => tar_bz2::decompress_reader_to_writer(stdin, &mut stdout, &opts)?,
+                        Format::TarBz2 => {
+                            tar_bz2::decompress_reader_to_writer(stdin, &mut stdout, &opts)?
+                        }
                         _ => return Err(Error::StdinNotSupported(format!("{:?}", fmt))),
                     }
                 } else {
@@ -318,11 +327,17 @@ fn run(cli: Cli) -> Result<()> {
                         Format::Zip => zip::decompress_to_writer(&input, &mut stdout, &opts)?,
                         Format::Tar => tar::decompress_to_writer(&input, &mut stdout, &opts)?,
                         Format::TarGz => tar_gz::decompress_to_writer(&input, &mut stdout, &opts)?,
-                        Format::TarZst => tar_zst::decompress_to_writer(&input, &mut stdout, &opts)?,
+                        Format::TarZst => {
+                            tar_zst::decompress_to_writer(&input, &mut stdout, &opts)?
+                        }
                         Format::TarXz => tar_xz::decompress_to_writer(&input, &mut stdout, &opts)?,
                         #[cfg(feature = "bzip2")]
-                        Format::TarBz2 => tar_bz2::decompress_to_writer(&input, &mut stdout, &opts)?,
-                        Format::SevenZ => seven_z::decompress_to_writer(&input, &mut stdout, &opts)?,
+                        Format::TarBz2 => {
+                            tar_bz2::decompress_to_writer(&input, &mut stdout, &opts)?
+                        }
+                        Format::SevenZ => {
+                            seven_z::decompress_to_writer(&input, &mut stdout, &opts)?
+                        }
                         #[allow(unreachable_patterns)]
                         other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
                     }
@@ -333,7 +348,11 @@ fn run(cli: Cli) -> Result<()> {
                 match fmt {
                     Format::Tar => tar::decompress_from_reader(stdin, &output, &opts)?,
                     Format::TarGz => tar_gz::decompress_from_reader(stdin, &output, &opts)?,
-                    Format::TarZst => tar_zst::decompress_from_reader(std::io::BufReader::new(stdin), &output, &opts)?,
+                    Format::TarZst => tar_zst::decompress_from_reader(
+                        std::io::BufReader::new(stdin),
+                        &output,
+                        &opts,
+                    )?,
                     Format::TarXz => tar_xz::decompress_from_reader(stdin, &output, &opts)?,
                     #[cfg(feature = "bzip2")]
                     Format::TarBz2 => tar_bz2::decompress_from_reader(stdin, &output, &opts)?,
@@ -351,15 +370,17 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarBz2 => tar_bz2::decompress(&input, &output, &opts)?,
                     Format::SevenZ => seven_z::decompress(&input, &output, &opts)?,
                     #[allow(unreachable_patterns)]
-                    other => return Err(Error::UnsupportedFormat(
-                        format!("{:?}", other),
-                    )),
+                    other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
                 }
             }
             progress.finish();
             if totals {
                 let mut stderr = std::io::stderr().lock();
-                let _ = writeln!(stderr, "Total bytes: {}", format_size(progress.position(), false));
+                let _ = writeln!(
+                    stderr,
+                    "Total bytes: {}",
+                    format_size(progress.position(), false)
+                );
             }
         }
 
@@ -384,9 +405,7 @@ fn run(cli: Cli) -> Result<()> {
                 Format::TarBz2 => tar_bz2::list(&input)?,
                 Format::SevenZ => seven_z::list(&input)?,
                 #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(
-                    format!("{:?}", other),
-                )),
+                other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
             };
 
             let excludes = filter::build_excludes(exclude, &exclude_from)?;
@@ -451,9 +470,7 @@ fn run(cli: Cli) -> Result<()> {
                 Format::TarBz2 => tar_bz2::test(&input, progress)?,
                 Format::SevenZ => seven_z::test(&input, progress)?,
                 #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(
-                    format!("{:?}", other),
-                )),
+                other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
             }
             progress.finish();
             if !cli.quiet {
@@ -462,7 +479,12 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Command::Info { input, format, human_readable, json } => {
+        Command::Info {
+            input,
+            format,
+            human_readable,
+            json,
+        } => {
             let fmt = resolve_input_format(format, &input)?;
             let info = match fmt {
                 Format::Zip => zip::info(&input)?,
@@ -474,9 +496,7 @@ fn run(cli: Cli) -> Result<()> {
                 Format::TarBz2 => tar_bz2::info(&input)?,
                 Format::SevenZ => seven_z::info(&input)?,
                 #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(
-                    format!("{:?}", other),
-                )),
+                other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
             };
 
             let mut stdout = std::io::stdout().lock();
@@ -486,13 +506,21 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 let _ = writeln!(stdout, "Format:       {}", info.format);
                 let _ = writeln!(stdout, "Entries:      {}", info.entry_count);
-                let _ = writeln!(stdout, "Compressed:   {}", format_size(info.compressed_size, human_readable));
-                let _ = writeln!(stdout, "Uncompressed: {}", format_size(info.total_uncompressed, human_readable));
+                let _ = writeln!(
+                    stdout,
+                    "Compressed:   {}",
+                    format_size(info.compressed_size, human_readable)
+                );
+                let _ = writeln!(
+                    stdout,
+                    "Uncompressed: {}",
+                    format_size(info.total_uncompressed, human_readable)
+                );
             }
         }
 
-        Command::Formats => {
-            print_formats();
+        Command::Formats { json } => {
+            print_formats(json)?;
         }
 
         Command::Completions { shell } => {
@@ -511,22 +539,113 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn print_formats() {
-    let formats: &[(&str, &str, &str, bool)] = &[
-        ("tar",      ".tar",     "—",            true),
-        ("tar-gz",   ".tar.gz",  "flate2",       true),
-        ("tar-zst",  ".tar.zst", "ruzstd",       true),
-        ("tar-xz",   ".tar.xz",  if cfg!(feature = "xz2") { "xz2 (C)" } else { "lzma-rs" }, true),
-        ("tar-bz2",  ".tar.bz2", "bzip2 (C)",    cfg!(feature = "bzip2")),
-        ("zip",      ".zip",     "zip",          true),
-        ("7z",       ".7z",      "sevenz-rust2", true),
+fn print_formats(json: bool) -> Result<()> {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "lowercase")]
+    enum OutputStatus {
+        Enabled,
+        Disabled,
+    }
+
+    #[derive(Serialize)]
+    struct OutputFormat {
+        format: String,
+        extension: String,
+        backend: Option<String>,
+        status: OutputStatus,
+    }
+
+    let formats = vec![
+        OutputFormat {
+            format: "tar".into(),
+            extension: ".tar".into(),
+            backend: None,
+            status: OutputStatus::Enabled,
+        },
+        OutputFormat {
+            format: "tar-gz".into(),
+            extension: ".tar.gz".into(),
+            backend: Some("flate2".into()),
+            status: OutputStatus::Enabled,
+        },
+        OutputFormat {
+            format: "tar-zst".into(),
+            extension: ".tar.zst".into(),
+            backend: Some("ruzstd".into()),
+            status: OutputStatus::Enabled,
+        },
+        OutputFormat {
+            format: "tar-cz".into(),
+            extension: ".tar.xz".into(),
+            backend: Some(if cfg!(feature = "xz2") {
+                "xz2 (C)".into()
+            } else {
+                "lzma-rs".into()
+            }),
+            status: OutputStatus::Enabled,
+        },
+        OutputFormat {
+            format: "tar-bz2".into(),
+            extension: ".tar.bz2".into(),
+            backend: Some("bzip2".into()),
+            status: if cfg!(feature = "bzip2") {
+                OutputStatus::Enabled
+            } else {
+                OutputStatus::Disabled
+            },
+        },
+        OutputFormat {
+            format: "zip".into(),
+            extension: ".zip".into(),
+            backend: Some("zip".into()),
+            status: OutputStatus::Enabled,
+        },
+        OutputFormat {
+            format: "7z".into(),
+            extension: ".7z".into(),
+            backend: Some("sevenz-rust2".into()),
+            status: OutputStatus::Enabled,
+        },
     ];
 
-    let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{:<12} {:<12} {:<16} STATUS", "FORMAT", "EXTENSION", "BACKEND");
-    let _ = writeln!(stdout, "{}", "-".repeat(52));
-    for &(name, ext, backend, enabled) in formats {
-        let status = if enabled { "enabled" } else { "disabled" };
-        let _ = writeln!(stdout, "{name:<12} {ext:<12} {backend:<16} {status}");
+    if json {
+        let mut stdout = std::io::stdout().lock();
+        let json = serde_json::to_string(&formats)
+            .map_err(std::io::Error::other)?;
+        let _ = writeln!(stdout, "{}", json);
+    } else {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(
+            stdout,
+            "{:<12} {:<12} {:<16} STATUS",
+            "FORMAT", "EXTENSION", "BACKEND"
+        );
+        let _ = writeln!(stdout, "{}", "-".repeat(52));
+
+        for OutputFormat {
+            format,
+            extension,
+            backend,
+            status,
+        } in formats
+        {
+            let status = match status {
+                OutputStatus::Enabled => "enabled",
+                OutputStatus::Disabled => "disabled",
+            };
+
+            let backend = match backend {
+                Some(backend) => backend,
+                None => "-".into(),
+            };
+
+            let _ = writeln!(
+                stdout,
+                "{format:<12} {extension:<12} {backend:<16} {status}"
+            );
+        }
     }
+    Ok(())
 }

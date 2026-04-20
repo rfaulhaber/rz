@@ -61,9 +61,7 @@ impl Format {
 
     /// Derive a default output path from the first input and the format's extension.
     pub fn default_output(&self, first_input: &Utf8Path) -> Utf8PathBuf {
-        let stem = first_input
-            .file_name()
-            .unwrap_or(first_input.as_str());
+        let stem = first_input.file_name().unwrap_or(first_input.as_str());
         let mut out = Utf8PathBuf::from(stem);
         let ext = self.extension();
         out.set_file_name(format!("{stem}{ext}"));
@@ -89,18 +87,14 @@ pub fn resolve_compress_format(
 }
 
 /// Resolve format for `decompress`/`list`/`info`: explicit flag → magic bytes → extension.
-pub fn resolve_input_format(
-    explicit: Option<Format>,
-    input: &Utf8Path,
-) -> Result<Format> {
+pub fn resolve_input_format(explicit: Option<Format>, input: &Utf8Path) -> Result<Format> {
     if let Some(f) = explicit {
         return Ok(f);
     }
     if let Some(f) = Format::from_magic(input) {
         return Ok(f);
     }
-    Format::from_path(input)
-        .ok_or_else(|| Error::CannotInferFormat(input.to_owned()))
+    Format::from_path(input).ok_or_else(|| Error::CannotInferFormat(input.to_owned()))
 }
 
 #[cfg(test)]
@@ -114,42 +108,66 @@ mod tests {
 
     #[test]
     fn from_path_tar_gz() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.tar.gz")), Some(Format::TarGz));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.tar.gz")),
+            Some(Format::TarGz)
+        );
     }
 
     #[test]
     fn from_path_tgz() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.tgz")), Some(Format::TarGz));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.tgz")),
+            Some(Format::TarGz)
+        );
     }
 
     #[test]
     fn from_path_tar_zst() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.tar.zst")), Some(Format::TarZst));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.tar.zst")),
+            Some(Format::TarZst)
+        );
     }
 
     #[test]
     fn from_path_tzst() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.tzst")), Some(Format::TarZst));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.tzst")),
+            Some(Format::TarZst)
+        );
     }
 
     #[test]
     fn from_path_tar_xz() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.tar.xz")), Some(Format::TarXz));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.tar.xz")),
+            Some(Format::TarXz)
+        );
     }
 
     #[test]
     fn from_path_txz() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.txz")), Some(Format::TarXz));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.txz")),
+            Some(Format::TarXz)
+        );
     }
 
     #[test]
     fn from_path_tar_bz2() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.tar.bz2")), Some(Format::TarBz2));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.tar.bz2")),
+            Some(Format::TarBz2)
+        );
     }
 
     #[test]
     fn from_path_tbz2() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.tbz2")), Some(Format::TarBz2));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.tbz2")),
+            Some(Format::TarBz2)
+        );
     }
 
     #[test]
@@ -164,7 +182,10 @@ mod tests {
 
     #[test]
     fn from_path_seven_z() {
-        assert_eq!(Format::from_path(Utf8Path::new("a.7z")), Some(Format::SevenZ));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("a.7z")),
+            Some(Format::SevenZ)
+        );
     }
 
     #[test]
@@ -179,8 +200,14 @@ mod tests {
 
     #[test]
     fn from_path_is_case_insensitive() {
-        assert_eq!(Format::from_path(Utf8Path::new("A.TAR.GZ")), Some(Format::TarGz));
-        assert_eq!(Format::from_path(Utf8Path::new("B.Tar.Bz2")), Some(Format::TarBz2));
+        assert_eq!(
+            Format::from_path(Utf8Path::new("A.TAR.GZ")),
+            Some(Format::TarGz)
+        );
+        assert_eq!(
+            Format::from_path(Utf8Path::new("B.Tar.Bz2")),
+            Some(Format::TarBz2)
+        );
         assert_eq!(Format::from_path(Utf8Path::new("C.ZIP")), Some(Format::Zip));
     }
 
@@ -208,7 +235,12 @@ mod tests {
         for fmt in &formats {
             let name = format!("test{}", fmt.extension());
             let detected = Format::from_path(Utf8Path::new(&name));
-            assert_eq!(detected.as_ref(), Some(fmt), "round-trip failed for {}", fmt.extension());
+            assert_eq!(
+                detected.as_ref(),
+                Some(fmt),
+                "round-trip failed for {}",
+                fmt.extension()
+            );
         }
     }
 

@@ -133,11 +133,7 @@ fn zip_top_level_symlink_is_preserved() -> TestResult {
     symlink("real.txt", link.as_std_path())?;
 
     let archive = tmp.join("archive.zip");
-    rz::zip::compress(
-        &[Utf8PathBuf::from(&link)],
-        &archive,
-        &compress_opts(),
-    )?;
+    rz::zip::compress(&[Utf8PathBuf::from(&link)], &archive, &compress_opts())?;
 
     let file = fs_err::File::open(&archive)?;
     let mut z = ::zip::ZipArchive::new(file)?;

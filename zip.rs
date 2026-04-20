@@ -267,7 +267,10 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
         entries.push(Entry {
             path: Utf8PathBuf::from(entry.name()),
             size: entry.size(),
-            mtime: entry.last_modified().map(zip_datetime_to_epoch).unwrap_or(0),
+            mtime: entry
+                .last_modified()
+                .map(zip_datetime_to_epoch)
+                .unwrap_or(0),
             mode: entry.unix_mode().unwrap_or(0),
             is_dir: entry.is_dir(),
         });

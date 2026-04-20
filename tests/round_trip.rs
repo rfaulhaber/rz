@@ -1,6 +1,6 @@
 mod helpers;
 
-use helpers::{TestResult, SEVEN_Z, TAR, TAR_GZ, TAR_XZ, TAR_ZST, ZIP};
+use helpers::{SEVEN_Z, TAR, TAR_GZ, TAR_XZ, TAR_ZST, TestResult, ZIP};
 
 // ── tar.gz ───────────────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@ mod helpers;
 use camino::Utf8Path;
 use globset::GlobSet;
 
-use helpers::{build_file_tree, temp_utf8_dir, TestResult, TAR_GZ, ZIP};
+use helpers::{TAR_GZ, TestResult, ZIP, build_file_tree, temp_utf8_dir};
 use rz::filter::build_exclude_set;
 use rz::{CompressOpts, DecompressOpts};
 
@@ -12,10 +12,8 @@ use rz::{CompressOpts, DecompressOpts};
 fn compress_opts(excludes: &[&str]) -> CompressOpts<'static> {
     CompressOpts::new(
         None,
-        build_exclude_set(
-            &excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| GlobSet::empty()),
+        build_exclude_set(&excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+            .unwrap_or_else(|_| GlobSet::empty()),
     )
 }
 
@@ -24,10 +22,8 @@ fn decompress_opts(strip: u32, excludes: &[&str]) -> DecompressOpts<'static> {
         false,
         strip,
         GlobSet::empty(),
-        build_exclude_set(
-            &excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
-        )
-        .unwrap_or_else(|_| GlobSet::empty()),
+        build_exclude_set(&excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+            .unwrap_or_else(|_| GlobSet::empty()),
     )
 }
 
@@ -68,7 +64,10 @@ fn tar_gz_compress_exclude_by_extension() -> TestResult {
 
     assert!(paths.iter().any(|p| p.ends_with("hello.txt")));
     assert!(paths.iter().any(|p| p.ends_with("nested.txt")));
-    assert!(!paths.iter().any(|p| p.ends_with(".log")), "log files should be excluded: {paths:?}");
+    assert!(
+        !paths.iter().any(|p| p.ends_with(".log")),
+        "log files should be excluded: {paths:?}"
+    );
     Ok(())
 }
 
@@ -88,7 +87,10 @@ fn zip_compress_exclude_by_extension() -> TestResult {
 
     assert!(paths.iter().any(|p| p.ends_with("hello.txt")));
     assert!(paths.iter().any(|p| p.ends_with("nested.txt")));
-    assert!(!paths.iter().any(|p| p.ends_with(".log")), "log files should be excluded: {paths:?}");
+    assert!(
+        !paths.iter().any(|p| p.ends_with(".log")),
+        "log files should be excluded: {paths:?}"
+    );
     Ok(())
 }
 
@@ -107,7 +109,10 @@ fn tar_gz_compress_exclude_directory() -> TestResult {
     let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
 
     assert!(paths.iter().any(|p| p.ends_with("hello.txt")));
-    assert!(!paths.iter().any(|p| p.contains("subdir")), "subdir should be excluded: {paths:?}");
+    assert!(
+        !paths.iter().any(|p| p.contains("subdir")),
+        "subdir should be excluded: {paths:?}"
+    );
     Ok(())
 }
 
@@ -130,8 +135,14 @@ fn tar_gz_decompress_exclude_by_extension() -> TestResult {
 
     assert!(out.join("tree/hello.txt").exists());
     assert!(out.join("tree/subdir/nested.txt").exists());
-    assert!(!out.join("tree/notes.log").exists(), "notes.log should be excluded");
-    assert!(!out.join("tree/subdir/debug.log").exists(), "debug.log should be excluded");
+    assert!(
+        !out.join("tree/notes.log").exists(),
+        "notes.log should be excluded"
+    );
+    assert!(
+        !out.join("tree/subdir/debug.log").exists(),
+        "debug.log should be excluded"
+    );
     Ok(())
 }
 
@@ -152,8 +163,14 @@ fn zip_decompress_exclude_by_extension() -> TestResult {
 
     assert!(out.join("tree/hello.txt").exists());
     assert!(out.join("tree/subdir/nested.txt").exists());
-    assert!(!out.join("tree/notes.log").exists(), "notes.log should be excluded");
-    assert!(!out.join("tree/subdir/debug.log").exists(), "debug.log should be excluded");
+    assert!(
+        !out.join("tree/notes.log").exists(),
+        "notes.log should be excluded"
+    );
+    assert!(
+        !out.join("tree/subdir/debug.log").exists(),
+        "debug.log should be excluded"
+    );
     Ok(())
 }
 
@@ -175,8 +192,14 @@ fn tar_gz_strip_components_one() -> TestResult {
     let opts = decompress_opts(1, &[]);
     (TAR_GZ.decompress)(&archive, &out, &opts)?;
 
-    assert!(out.join("hello.txt").exists(), "hello.txt should be at top level");
-    assert!(out.join("subdir/nested.txt").exists(), "nested.txt should be under subdir/");
+    assert!(
+        out.join("hello.txt").exists(),
+        "hello.txt should be at top level"
+    );
+    assert!(
+        out.join("subdir/nested.txt").exists(),
+        "nested.txt should be under subdir/"
+    );
     // The original top-level "tree" directory entry should have been stripped away
     assert!(!out.join("tree").exists(), "tree/ wrapper should not exist");
     Ok(())
@@ -197,8 +220,14 @@ fn zip_strip_components_one() -> TestResult {
     let opts = decompress_opts(1, &[]);
     (ZIP.decompress)(&archive, &out, &opts)?;
 
-    assert!(out.join("hello.txt").exists(), "hello.txt should be at top level");
-    assert!(out.join("subdir/nested.txt").exists(), "nested.txt should be under subdir/");
+    assert!(
+        out.join("hello.txt").exists(),
+        "hello.txt should be at top level"
+    );
+    assert!(
+        out.join("subdir/nested.txt").exists(),
+        "nested.txt should be under subdir/"
+    );
     assert!(!out.join("tree").exists(), "tree/ wrapper should not exist");
     Ok(())
 }
@@ -221,8 +250,17 @@ fn tar_gz_strip_and_exclude_combined() -> TestResult {
 
     assert!(out.join("hello.txt").exists());
     assert!(out.join("subdir/nested.txt").exists());
-    assert!(!out.join("notes.log").exists(), "notes.log should be excluded");
-    assert!(!out.join("subdir/debug.log").exists(), "debug.log should be excluded");
-    assert!(!out.join("tree").exists(), "tree/ wrapper should be stripped");
+    assert!(
+        !out.join("notes.log").exists(),
+        "notes.log should be excluded"
+    );
+    assert!(
+        !out.join("subdir/debug.log").exists(),
+        "debug.log should be excluded"
+    );
+    assert!(
+        !out.join("tree").exists(),
+        "tree/ wrapper should be stripped"
+    );
     Ok(())
 }

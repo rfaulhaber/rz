@@ -1,6 +1,6 @@
-use std::io::{BufReader, BufWriter};
 #[cfg(not(feature = "xz2"))]
 use std::io::Cursor;
+use std::io::{BufReader, BufWriter};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -11,11 +11,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "xz2")]
-pub fn compress(
-    inputs: &[Utf8PathBuf],
-    output: &Utf8Path,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
+pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let level = opts.level.unwrap_or(6);
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
@@ -33,11 +29,7 @@ pub fn compress(
 }
 
 #[cfg(not(feature = "xz2"))]
-pub fn compress(
-    inputs: &[Utf8PathBuf],
-    output: &Utf8Path,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
+pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     // lzma-rs provides a one-shot compress function, so we buffer the tar
     // archive in memory first, then xz-compress to the output file.
     let mut tar_data = Vec::new();
@@ -103,7 +95,11 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
 }
 
 #[cfg(feature = "xz2")]
-pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_from_reader<R: std::io::Read>(
+    reader: R,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let decoder = xz2::read::XzDecoder::new(BufReader::new(reader));
     let mut archive = tar::Archive::new(decoder);
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
@@ -115,7 +111,11 @@ pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, op
 /// entire decompressed tar archive is buffered in RAM.  For large archives
 /// this can require significant memory.  Enable the `xz2` feature for a
 /// streaming C-backed decoder that avoids this limitation.
-pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_from_reader<R: std::io::Read>(
+    reader: R,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let mut tar_data = Vec::new();
     lzma_rs::xz_decompress(&mut BufReader::new(reader), &mut tar_data)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -126,20 +126,32 @@ pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, op
 
 // ── Decompress to writer ─────────────────────────────────────────────────────
 
-pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_to_writer<W: std::io::Write>(
+    input: &Utf8Path,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let mut archive = open_archive(input)?;
     filter::extract_tar_to_writer(&mut archive, writer, opts)
 }
 
 #[cfg(feature = "xz2")]
-pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(
+    reader: R,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let decoder = xz2::read::XzDecoder::new(BufReader::new(reader));
     let mut archive = tar::Archive::new(decoder);
     filter::extract_tar_to_writer(&mut archive, writer, opts)
 }
 
 #[cfg(not(feature = "xz2"))]
-pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(
+    reader: R,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let mut tar_data = Vec::new();
     lzma_rs::xz_decompress(&mut BufReader::new(reader), &mut tar_data)
         .map_err(|e| std::io::Error::other(e.to_string()))?;

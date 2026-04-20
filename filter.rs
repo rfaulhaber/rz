@@ -1,4 +1,5 @@
 use std::io::BufRead;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -377,6 +378,24 @@ fn has_header_overrides(opts: &CompressOpts<'_>) -> bool {
     opts.fixed_mtime.is_some() || opts.fixed_uid.is_some() || opts.fixed_gid.is_some()
 }
 
+/// Extract Unix permission mode from filesystem metadata.
+/// On Unix, returns the actual mode bits. On other platforms, returns a
+/// sensible default (0o755 for directories, 0o644 for files).
+fn metadata_mode(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        meta.permissions().mode()
+    }
+    #[cfg(not(unix))]
+    {
+        if meta.is_dir() {
+            0o755
+        } else {
+            0o644
+        }
+    }
+}
+
 /// Append a single file to a tar builder, applying header overrides if set.
 fn append_file_entry<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
@@ -390,7 +409,8 @@ fn append_file_entry<W: std::io::Write>(
         header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
         // Re-apply the real metadata fields that Deterministic mode zeroes.
         header.set_size(meta.len());
-        header.set_mode(meta.permissions().mode());
+        header.set_mode(metadata_mode(&meta));
+
         if opts.fixed_mtime.is_none() {
             // Preserve original mtime if not explicitly overridden.
             let mtime = meta
@@ -401,6 +421,7 @@ fn append_file_entry<W: std::io::Write>(
                 .unwrap_or(0);
             header.set_mtime(mtime);
         }
+
         apply_header_overrides(&mut header, opts);
         header.set_cksum();
         let mut file = fs_err::File::open(fs_path)?;
@@ -424,7 +445,7 @@ fn append_dir_entry<W: std::io::Write>(
         header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
         header.set_entry_type(tar::EntryType::Directory);
         header.set_size(0);
-        header.set_mode(meta.permissions().mode());
+        header.set_mode(metadata_mode(&meta));
         if opts.fixed_mtime.is_none() {
             let mtime = meta
                 .modified()

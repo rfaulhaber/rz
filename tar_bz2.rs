@@ -1,8 +1,8 @@
 use std::io::{BufReader, BufWriter};
 
+use bzip2::Compression;
 use bzip2::read::BzDecoder;
 use bzip2::write::BzEncoder;
-use bzip2::Compression;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::error::Result;
@@ -11,11 +11,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
-pub fn compress(
-    inputs: &[Utf8PathBuf],
-    output: &Utf8Path,
-    opts: &CompressOpts<'_>,
-) -> Result<()> {
+pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let compression = match opts.level {
         Some(l) => Compression::try_new(l)
             .ok_or_else(|| std::io::Error::other("bzip2 compression level must be 1..=9"))?,
@@ -70,7 +66,11 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     decompress_from_reader(buf, output, opts)
 }
 
-pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_from_reader<R: std::io::Read>(
+    reader: R,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let bz = BzDecoder::new(reader);
     let mut archive = tar::Archive::new(bz);
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
@@ -79,13 +79,21 @@ pub fn decompress_from_reader<R: std::io::Read>(reader: R, output: &Utf8Path, op
 
 // ── Decompress to writer ─────────────────────────────────────────────────────
 
-pub fn decompress_to_writer<W: std::io::Write>(input: &Utf8Path, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_to_writer<W: std::io::Write>(
+    input: &Utf8Path,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
     decompress_reader_to_writer(buf, writer, opts)
 }
 
-pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(reader: R, writer: &mut W, opts: &DecompressOpts<'_>) -> Result<()> {
+pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(
+    reader: R,
+    writer: &mut W,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
     let bz = BzDecoder::new(reader);
     let mut archive = tar::Archive::new(bz);
     filter::extract_tar_to_writer(&mut archive, writer, opts)

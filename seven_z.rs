@@ -65,11 +65,12 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     } else {
         sevenz_rust2::decompress_file_with_extract_fn(input, output, |entry, reader, dest| {
             // Reject entries that attempt path traversal.
-            crate::filter::safe_entry_path(&entry.name)
-                .map_err(|e| sevenz_rust2::Error::Io(
+            crate::filter::safe_entry_path(&entry.name).map_err(|e| {
+                sevenz_rust2::Error::Io(
                     std::io::Error::other(e.to_string()),
                     entry.name.clone().into(),
-                ))?;
+                )
+            })?;
 
             if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
                 return Ok(true);
@@ -100,10 +101,7 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                     let utf8 = Utf8PathBuf::from(out_path.display().to_string());
                     let err = Error::FileExists(utf8);
                     return Err(sevenz_rust2::Error::Io(
-                        std::io::Error::new(
-                            std::io::ErrorKind::AlreadyExists,
-                            err.to_string(),
-                        ),
+                        std::io::Error::new(std::io::ErrorKind::AlreadyExists, err.to_string()),
                         err.to_string().into(),
                     ));
                 }
@@ -135,11 +133,12 @@ pub fn decompress_to_writer<W: std::io::Write>(
     }
     sevenz_rust2::decompress_file_with_extract_fn(input, ".", |entry, reader, _dest| {
         // Reject entries that attempt path traversal.
-        crate::filter::safe_entry_path(&entry.name)
-            .map_err(|e| sevenz_rust2::Error::Io(
+        crate::filter::safe_entry_path(&entry.name).map_err(|e| {
+            sevenz_rust2::Error::Io(
                 std::io::Error::other(e.to_string()),
                 entry.name.clone().into(),
-            ))?;
+            )
+        })?;
 
         if entry.is_directory {
             return Ok(true);

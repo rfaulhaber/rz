@@ -122,7 +122,11 @@ impl FormatHarness {
         build_file_tree(&tree)?;
 
         let archive = tmp.join(format!("archive{}", self.ext));
-        (self.compress)(std::slice::from_ref(&tree), &archive, &default_compress_opts(level))?;
+        (self.compress)(
+            std::slice::from_ref(&tree),
+            &archive,
+            &default_compress_opts(level),
+        )?;
 
         let out = tmp.join("out");
         if self.preserves_top_dir {

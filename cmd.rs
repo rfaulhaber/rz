@@ -3,7 +3,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 #[derive(Debug, Parser)]
-#[command(name = "rz", version, about = "Multi-format compression and decompression tool")]
+#[command(
+    name = "rz",
+    version,
+    about = "Multi-format compression and decompression tool"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -232,7 +236,11 @@ pub enum Command {
     },
 
     /// List supported archive formats
-    Formats,
+    Formats {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Generate shell completions
     Completions {
