@@ -1,5 +1,6 @@
 use camino::Utf8PathBuf;
 use globset::GlobSet;
+use serde::Serialize;
 
 use crate::progress::{NoProgress, ProgressReport};
 
@@ -18,6 +19,7 @@ pub mod tar_zst;
 pub mod zip;
 
 /// Metadata for a single entry within an archive.
+#[derive(Serialize)]
 pub struct Entry {
     pub path: Utf8PathBuf,
     pub size: u64,
@@ -27,6 +29,7 @@ pub struct Entry {
 }
 
 /// Summary metadata for an archive.
+#[derive(Serialize)]
 pub struct ArchiveInfo {
     pub format: &'static str,
     pub entry_count: usize,
@@ -42,6 +45,12 @@ pub struct CompressOpts<'a> {
     pub exclude_vcs_ignores: bool,
     pub no_recursion: bool,
     pub progress: &'a dyn ProgressReport,
+    /// Override mtime on all entries (unix timestamp).
+    pub fixed_mtime: Option<u64>,
+    /// Override uid on all entries.
+    pub fixed_uid: Option<u64>,
+    /// Override gid on all entries.
+    pub fixed_gid: Option<u64>,
 }
 
 /// Options for decompress operations.
@@ -68,6 +77,9 @@ impl CompressOpts<'_> {
             exclude_vcs_ignores: false,
             no_recursion: false,
             progress: &NoProgress,
+            fixed_mtime: None,
+            fixed_uid: None,
+            fixed_gid: None,
         }
     }
 }

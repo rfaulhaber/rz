@@ -49,7 +49,7 @@
             pkgs.rustPlatform.buildRustPackage {
               inherit features;
               pname = projectName;
-              version = let file = builtins.readFile ./Cargo.toml |> builtins.fromTOML; in file.package.version;
+              version = let file = builtins.fromTOML (builtins.readFile ./Cargo.toml); in file.package.version;
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
             };

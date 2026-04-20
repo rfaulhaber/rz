@@ -1,4 +1,5 @@
 use std::io::BufRead;
+use std::os::unix::fs::PermissionsExt;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
@@ -358,6 +359,90 @@ pub fn verify_tar_entries<R: std::io::Read>(
     Ok(())
 }
 
+/// Apply reproducibility overrides (mtime, uid, gid) to a tar header.
+fn apply_header_overrides(header: &mut tar::Header, opts: &CompressOpts<'_>) {
+    if let Some(mtime) = opts.fixed_mtime {
+        header.set_mtime(mtime);
+    }
+    if let Some(uid) = opts.fixed_uid {
+        header.set_uid(uid);
+    }
+    if let Some(gid) = opts.fixed_gid {
+        header.set_gid(gid);
+    }
+}
+
+/// Returns `true` when any reproducibility overrides are active.
+fn has_header_overrides(opts: &CompressOpts<'_>) -> bool {
+    opts.fixed_mtime.is_some() || opts.fixed_uid.is_some() || opts.fixed_gid.is_some()
+}
+
+/// Append a single file to a tar builder, applying header overrides if set.
+fn append_file_entry<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    fs_path: &Utf8Path,
+    archive_name: &str,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    if has_header_overrides(opts) {
+        let meta = input_metadata(fs_path, opts.follow_symlinks)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
+        // Re-apply the real metadata fields that Deterministic mode zeroes.
+        header.set_size(meta.len());
+        header.set_mode(meta.permissions().mode());
+        if opts.fixed_mtime.is_none() {
+            // Preserve original mtime if not explicitly overridden.
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            header.set_mtime(mtime);
+        }
+        apply_header_overrides(&mut header, opts);
+        header.set_cksum();
+        let mut file = fs_err::File::open(fs_path)?;
+        builder.append_data(&mut header, archive_name, &mut file)?;
+    } else {
+        builder.append_path_with_name(fs_path, archive_name)?;
+    }
+    Ok(())
+}
+
+/// Append a directory entry to a tar builder, applying header overrides if set.
+fn append_dir_entry<W: std::io::Write>(
+    builder: &mut tar::Builder<W>,
+    fs_path: &Utf8Path,
+    archive_name: &str,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    if has_header_overrides(opts) {
+        let meta = input_metadata(fs_path, opts.follow_symlinks)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(meta.permissions().mode());
+        if opts.fixed_mtime.is_none() {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            header.set_mtime(mtime);
+        }
+        apply_header_overrides(&mut header, opts);
+        header.set_cksum();
+        builder.append_data(&mut header, archive_name, std::io::empty())?;
+    } else {
+        builder.append_dir(archive_name, fs_path)?;
+    }
+    Ok(())
+}
+
 /// Walk a directory tree and append entries to a tar builder, skipping paths
 /// that match the exclude set.  Reports progress per file via `progress`.
 ///
@@ -369,16 +454,16 @@ pub fn append_dir_filtered<W: std::io::Write>(
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     if opts.no_recursion {
-        builder.append_dir(prefix, dir)?;
+        append_dir_entry(builder, dir, prefix, opts)?;
         return Ok(());
     }
 
     walk_dir(dir, prefix, opts, &mut |entry| {
         if entry.is_dir {
-            builder.append_dir(&entry.archive_name, &entry.fs_path)?;
+            append_dir_entry(builder, &entry.fs_path, &entry.archive_name, opts)?;
         } else {
             let meta = input_metadata(&entry.fs_path, opts.follow_symlinks)?;
-            builder.append_path_with_name(&entry.fs_path, &entry.archive_name)?;
+            append_file_entry(builder, &entry.fs_path, &entry.archive_name, opts)?;
             opts.progress.set_entry(&entry.archive_name);
             opts.progress.inc(meta.len());
         }
@@ -404,7 +489,7 @@ pub fn append_inputs<W: std::io::Write>(
             append_dir_filtered(builder, input, name, opts)?;
         } else {
             let size = meta.len();
-            builder.append_path_with_name(input, name)?;
+            append_file_entry(builder, input, name, opts)?;
             opts.progress.set_entry(name);
             opts.progress.inc(size);
         }

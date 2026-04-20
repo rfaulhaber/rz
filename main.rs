@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use rz::cmd::{Cli, Command, Format, SortField};
 use rz::error::{Error, Result};
@@ -60,6 +60,7 @@ fn run(cli: Cli) -> Result<()> {
             output,
             format,
             level,
+            store,
             exclude,
             exclude_from,
             files_from,
@@ -70,7 +71,12 @@ fn run(cli: Cli) -> Result<()> {
             no_recursion,
             totals,
             dry_run,
+            mtime,
+            owner,
+            group,
         } => {
+            let level = if store { Some(0) } else { level };
+
             // Merge --files-from paths into input list.
             if let Some(ref list_file) = files_from {
                 let extra = filter::read_paths_from_file(list_file)?;
@@ -100,6 +106,9 @@ fn run(cli: Cli) -> Result<()> {
                     exclude_vcs_ignores,
                     no_recursion,
                     progress: &NoProgress,
+                    fixed_mtime: mtime,
+                    fixed_uid: owner,
+                    fixed_gid: group,
                 };
                 let paths = filter::collect_compress_paths(&input, &dry_opts)?;
                 let mut stdout = std::io::stdout().lock();
@@ -144,6 +153,9 @@ fn run(cli: Cli) -> Result<()> {
                 exclude_vcs_ignores,
                 no_recursion,
                 progress,
+                fixed_mtime: mtime,
+                fixed_uid: owner,
+                fixed_gid: group,
             };
 
             if to_stdout {
@@ -359,6 +371,7 @@ fn run(cli: Cli) -> Result<()> {
             exclude_from,
             sort,
             human_readable,
+            json,
         } => {
             let fmt = resolve_input_format(format, &input)?;
             let mut entries = match fmt {
@@ -387,21 +400,28 @@ fn run(cli: Cli) -> Result<()> {
             }
 
             let includes = globset::GlobSet::empty();
+            let filtered: Vec<_> = entries
+                .into_iter()
+                .filter(|e| filter::should_extract(e.path.as_str(), &includes, &excludes))
+                .collect();
+
             let mut stdout = std::io::stdout().lock();
-            for entry in &entries {
-                if !filter::should_extract(entry.path.as_str(), &includes, &excludes) {
-                    continue;
-                }
-                if long {
-                    let kind = if entry.is_dir { "d" } else { "-" };
-                    let size_str = format_size(entry.size, human_readable);
-                    let _ = writeln!(
-                        stdout,
-                        "{kind}{:06o}  {:>10}  {}",
-                        entry.mode, size_str, entry.path,
-                    );
-                } else {
-                    let _ = writeln!(stdout, "{}", entry.path);
+            if json {
+                let _ = serde_json::to_writer_pretty(&mut stdout, &filtered);
+                let _ = writeln!(stdout);
+            } else {
+                for entry in &filtered {
+                    if long {
+                        let kind = if entry.is_dir { "d" } else { "-" };
+                        let size_str = format_size(entry.size, human_readable);
+                        let _ = writeln!(
+                            stdout,
+                            "{kind}{:06o}  {:>10}  {}",
+                            entry.mode, size_str, entry.path,
+                        );
+                    } else {
+                        let _ = writeln!(stdout, "{}", entry.path);
+                    }
                 }
             }
         }
@@ -442,7 +462,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Command::Info { input, format, human_readable } => {
+        Command::Info { input, format, human_readable, json } => {
             let fmt = resolve_input_format(format, &input)?;
             let info = match fmt {
                 Format::Zip => zip::info(&input)?,
@@ -460,12 +480,53 @@ fn run(cli: Cli) -> Result<()> {
             };
 
             let mut stdout = std::io::stdout().lock();
-            let _ = writeln!(stdout, "Format:       {}", info.format);
-            let _ = writeln!(stdout, "Entries:      {}", info.entry_count);
-            let _ = writeln!(stdout, "Compressed:   {}", format_size(info.compressed_size, human_readable));
-            let _ = writeln!(stdout, "Uncompressed: {}", format_size(info.total_uncompressed, human_readable));
+            if json {
+                let _ = serde_json::to_writer_pretty(&mut stdout, &info);
+                let _ = writeln!(stdout);
+            } else {
+                let _ = writeln!(stdout, "Format:       {}", info.format);
+                let _ = writeln!(stdout, "Entries:      {}", info.entry_count);
+                let _ = writeln!(stdout, "Compressed:   {}", format_size(info.compressed_size, human_readable));
+                let _ = writeln!(stdout, "Uncompressed: {}", format_size(info.total_uncompressed, human_readable));
+            }
+        }
+
+        Command::Formats => {
+            print_formats();
+        }
+
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "rz", &mut std::io::stdout().lock());
+        }
+
+        Command::Man => {
+            let cmd = Cli::command();
+            let man = clap_mangen::Man::new(cmd);
+            let mut stdout = std::io::stdout().lock();
+            man.render(&mut stdout).map_err(Error::Io)?;
         }
     }
 
     Ok(())
+}
+
+fn print_formats() {
+    let formats: &[(&str, &str, &str, bool)] = &[
+        ("tar",      ".tar",     "—",            true),
+        ("tar-gz",   ".tar.gz",  "flate2",       true),
+        ("tar-zst",  ".tar.zst", "ruzstd",       true),
+        ("tar-xz",   ".tar.xz",  if cfg!(feature = "xz2") { "xz2 (C)" } else { "lzma-rs" }, true),
+        ("tar-bz2",  ".tar.bz2", "bzip2 (C)",    cfg!(feature = "bzip2")),
+        ("zip",      ".zip",     "zip",          true),
+        ("7z",       ".7z",      "sevenz-rust2", true),
+    ];
+
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{:<12} {:<12} {:<16} STATUS", "FORMAT", "EXTENSION", "BACKEND");
+    let _ = writeln!(stdout, "{}", "-".repeat(52));
+    for &(name, ext, backend, enabled) in formats {
+        let status = if enabled { "enabled" } else { "disabled" };
+        let _ = writeln!(stdout, "{name:<12} {ext:<12} {backend:<16} {status}");
+    }
 }

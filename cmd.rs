@@ -1,5 +1,6 @@
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 #[derive(Debug, Parser)]
 #[command(name = "rz", version, about = "Multi-format compression and decompression tool")]
@@ -38,8 +39,12 @@ pub enum Command {
         format: Option<Format>,
 
         /// Compression level (format-dependent)
-        #[arg(short, long)]
+        #[arg(short, long, conflicts_with = "store")]
         level: Option<u32>,
+
+        /// Store without compression (equivalent to --level 0)
+        #[arg(short = '0', long)]
+        store: bool,
 
         /// Exclude files matching a glob pattern (repeatable)
         #[arg(long)]
@@ -80,6 +85,18 @@ pub enum Command {
         /// Show what would be compressed without creating an archive
         #[arg(short = 'n', long)]
         dry_run: bool,
+
+        /// Override mtime on all entries (unix timestamp, e.g. 0 for epoch)
+        #[arg(long)]
+        mtime: Option<u64>,
+
+        /// Override owner UID on all entries (e.g. 0 for root)
+        #[arg(long)]
+        owner: Option<u64>,
+
+        /// Override group GID on all entries (e.g. 0 for root)
+        #[arg(long)]
+        group: Option<u64>,
     },
 
     /// Decompress an archive
@@ -183,6 +200,10 @@ pub enum Command {
         /// Show sizes in human-readable format (KB, MB, GB)
         #[arg(long)]
         human_readable: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Test archive integrity (fully decompress without writing to disk)
@@ -204,7 +225,23 @@ pub enum Command {
         /// Show sizes in human-readable format (KB, MB, GB)
         #[arg(long)]
         human_readable: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
+
+    /// List supported archive formats
+    Formats,
+
+    /// Generate shell completions
+    Completions {
+        /// Target shell
+        shell: Shell,
+    },
+
+    /// Generate a man page
+    Man,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
