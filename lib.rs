@@ -105,16 +105,4 @@ impl DecompressOpts<'_> {
             progress: &NoProgress,
         }
     }
-
-    pub(crate) fn can_fast_path(&self) -> bool {
-        self.force
-            && self.includes.is_empty()
-            && self.excludes.is_empty()
-            && !self.no_overwrite
-            && !self.keep_newer
-            && !self.no_directory
-            && self.backup_suffix.is_none()
-            && self.strip_components == 0
-            && !self.preserve_permissions
-    }
 }

@@ -3,6 +3,14 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::cmd::Format;
 use crate::error::{Error, Result};
 
+/// Case-insensitive suffix check on ASCII bytes.  Equivalent to
+/// `s.to_ascii_lowercase().ends_with(suffix)` but without the allocation.
+fn ends_with_ci(s: &str, suffix: &str) -> bool {
+    let sb = s.as_bytes();
+    let tb = suffix.as_bytes();
+    sb.len() >= tb.len() && sb[sb.len() - tb.len()..].eq_ignore_ascii_case(tb)
+}
+
 impl Format {
     /// Infer format from a file path's extension(s).
     ///
@@ -10,22 +18,24 @@ impl Format {
     /// the last segment (e.g. "gz" for "foo.tar.gz"), which can't distinguish
     /// compound extensions like `.tar.gz` vs `.tar.zst`.
     pub fn from_path(path: &Utf8Path) -> Option<Self> {
-        let s = path.as_str().to_ascii_lowercase();
+        let s = path.as_str();
 
-        // Check longer suffixes first to avoid false matches
-        if s.ends_with(".tar.gz") || s.ends_with(".tgz") {
+        // Check longer suffixes first to avoid false matches.
+        // Uses byte-level case-insensitive comparison so we don't allocate a
+        // lowercased copy of the whole path just to test extensions.
+        if ends_with_ci(s, ".tar.gz") || ends_with_ci(s, ".tgz") {
             Some(Self::TarGz)
-        } else if s.ends_with(".tar.zst") || s.ends_with(".tzst") {
+        } else if ends_with_ci(s, ".tar.zst") || ends_with_ci(s, ".tzst") {
             Some(Self::TarZst)
-        } else if s.ends_with(".tar.xz") || s.ends_with(".txz") {
+        } else if ends_with_ci(s, ".tar.xz") || ends_with_ci(s, ".txz") {
             Some(Self::TarXz)
-        } else if s.ends_with(".tar.bz2") || s.ends_with(".tbz2") {
+        } else if ends_with_ci(s, ".tar.bz2") || ends_with_ci(s, ".tbz2") {
             Some(Self::TarBz2)
-        } else if s.ends_with(".tar") {
+        } else if ends_with_ci(s, ".tar") {
             Some(Self::Tar)
-        } else if s.ends_with(".zip") {
+        } else if ends_with_ci(s, ".zip") {
             Some(Self::Zip)
-        } else if s.ends_with(".7z") {
+        } else if ends_with_ci(s, ".7z") {
             Some(Self::SevenZ)
         } else {
             None

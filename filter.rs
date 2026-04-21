@@ -152,7 +152,10 @@ where
     F: FnMut(WalkEntry) -> Result<()>,
 {
     let mut entries: Vec<_> = fs_err::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
-    entries.sort_by_key(|e| e.file_name());
+    // `DirEntry::file_name()` returns an owned `OsString`.  Plain `sort_by_key`
+    // would recompute (and reallocate) the key on every comparison — ~N log N
+    // allocations.  `sort_by_cached_key` allocates each key exactly once.
+    entries.sort_by_cached_key(|e| e.file_name());
 
     for entry in entries {
         let entry_path = entry.path();

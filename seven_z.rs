@@ -3,6 +3,22 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::error::{Error, Result};
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
+/// The 7z backend can use a fast, single-call extraction path when no
+/// per-entry filtering or overwrite logic is needed.  This predicate is
+/// specific to 7z because every other backend streams entries through a
+/// filter loop unconditionally.
+fn can_fast_path(opts: &DecompressOpts<'_>) -> bool {
+    opts.force
+        && opts.includes.is_empty()
+        && opts.excludes.is_empty()
+        && !opts.no_overwrite
+        && !opts.keep_newer
+        && !opts.no_directory
+        && opts.backup_suffix.is_none()
+        && opts.strip_components == 0
+        && !opts.preserve_permissions
+}
+
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
@@ -60,7 +76,7 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     // Use the fast path only when force is set and no filtering/special
     // options are active.  Otherwise we need the callback to enforce
     // overwrite guards, include/exclude, and backup logic.
-    if opts.can_fast_path() {
+    if can_fast_path(opts) {
         sevenz_rust2::decompress_file(input, output)?;
     } else {
         sevenz_rust2::decompress_file_with_extract_fn(input, output, |entry, reader, dest| {
