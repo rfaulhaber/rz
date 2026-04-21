@@ -32,6 +32,40 @@ fn requires_seek(fmt: &Format) -> bool {
     matches!(fmt, Format::Zip | Format::SevenZ)
 }
 
+/// Reproducibility overrides (`--mtime`, `--owner`, `--group`) require writing
+/// per-entry metadata that zip and 7z don't expose through our underlying
+/// writers: zip has no UID/GID field in its central directory, and
+/// `sevenz-rust2::ArchiveWriter` has no per-entry metadata hook.  Rather than
+/// silently no-op the flags, reject up front with a clear pointer to the
+/// tar-family formats that do support reproducibility.
+fn reject_reproducibility_for_non_tar(
+    fmt: &Format,
+    mtime: Option<u64>,
+    owner: Option<u64>,
+    group: Option<u64>,
+) -> Result<()> {
+    let is_tar_family = matches!(
+        fmt,
+        Format::Tar | Format::TarGz | Format::TarZst | Format::TarXz | Format::TarBz2
+    );
+    if is_tar_family {
+        return Ok(());
+    }
+    let check = |flag: &'static str, value: Option<u64>| -> Result<()> {
+        if value.is_some() {
+            return Err(Error::ReproducibilityFlagUnsupported {
+                flag,
+                format: fmt.to_string(),
+            });
+        }
+        Ok(())
+    };
+    check("--mtime", mtime)?;
+    check("--owner", owner)?;
+    check("--group", group)?;
+    Ok(())
+}
+
 /// Format a byte count for display.  When `human` is true, uses IEC-style
 /// units (KiB, MiB, …); otherwise returns the raw number followed by "bytes".
 fn format_size(bytes: u64, human: bool) -> String {
@@ -129,6 +163,13 @@ fn run(cli: Cli) -> Result<()> {
             if to_stdout && requires_seek(&fmt) {
                 return Err(Error::StdoutNotSupported(fmt.to_string()));
             }
+
+            // Reproducibility flags are implemented only for tar-family formats;
+            // zip and 7z either lack fields for the metadata (zip has no UID/GID)
+            // or the writer doesn't expose per-entry overrides (sevenz-rust2).
+            // Reject rather than silently no-op so users don't get misleading
+            // results when chasing bit-for-bit reproducibility.
+            reject_reproducibility_for_non_tar(&fmt, mtime, owner, group)?;
 
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !to_stdout {
                 Box::new(BarProgress::spinner())

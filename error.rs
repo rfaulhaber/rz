@@ -42,6 +42,12 @@ pub enum Error {
     )]
     KeepNewerUnsupported(String),
 
+    #[error(
+        "{flag} is not supported for {format} format \
+         (supported on tar-family formats: tar, tar-gz, tar-zst, tar-xz, tar-bz2)"
+    )]
+    ReproducibilityFlagUnsupported { flag: &'static str, format: String },
+
     #[error("{0} format does not support reading from stdin (requires seekable input)")]
     StdinNotSupported(String),
 
