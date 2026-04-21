@@ -107,19 +107,49 @@ fn zip_preserves_symlinks_by_default() -> TestResult {
     let archive = tmp.join("archive.zip");
     rz::zip::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
 
-    // Inspect the archive directly — the rz zip extractor does not yet
-    // recreate symlinks on unpack, so we verify the stored entry instead.
-    let file = fs_err::File::open(&archive)?;
-    let mut z = ::zip::ZipArchive::new(file)?;
-    let mut found = false;
-    for i in 0..z.len() {
-        let entry = z.by_index(i)?;
-        if entry.name().ends_with("link.txt") {
-            assert!(entry.is_symlink(), "link.txt should be a symlink entry");
-            found = true;
-        }
-    }
-    assert!(found, "link.txt missing from archive");
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    rz::zip::decompress(&archive, &out, &decompress_opts())?;
+
+    let link = out.join("tree/link.txt");
+    let meta = fs_err::symlink_metadata(&link)?;
+    assert!(
+        meta.file_type().is_symlink(),
+        "extracted link.txt should be a symlink, got {:?}",
+        meta.file_type(),
+    );
+    let target = fs_err::read_link(&link)?;
+    let target = Utf8PathBuf::try_from(target)?;
+    assert_eq!(target, Utf8Path::new("real.txt"));
+    Ok(())
+}
+
+#[test]
+fn zip_overwrites_existing_symlink_on_force() -> TestResult {
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let tree = tmp.join("tree");
+    fs_err::create_dir(&tree)?;
+    fs_err::write(tree.join("real.txt"), b"target content\n")?;
+    symlink("real.txt", tree.join("link.txt").as_std_path())?;
+
+    let archive = tmp.join("archive.zip");
+    rz::zip::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
+
+    // First extraction creates the symlink.
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    rz::zip::decompress(&archive, &out, &decompress_opts())?;
+
+    // Second extraction with --force must replace the existing symlink without
+    // writing through it to the target.
+    let mut opts = decompress_opts();
+    opts.force = true;
+    rz::zip::decompress(&archive, &out, &opts)?;
+
+    let link = out.join("tree/link.txt");
+    let meta = fs_err::symlink_metadata(&link)?;
+    assert!(meta.file_type().is_symlink(), "link.txt must still be a symlink");
     Ok(())
 }
 

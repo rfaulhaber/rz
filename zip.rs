@@ -98,6 +98,54 @@ fn write_symlink_entry(
     Ok(())
 }
 
+/// Extract a zip symlink entry to `out_path`.
+///
+/// On Unix, creates a real symlink via `std::os::unix::fs::symlink`.  On other
+/// platforms, falls back to writing the link target as a plain text file —
+/// mirroring what typical Windows unzip tools do when they encounter a POSIX
+/// symlink entry they can't materialise.
+///
+/// Rejects absolute targets as a minimal guard against obvious symlink-based
+/// archive-escape attempts.  Does not attempt deeper validation (the broader
+/// problem of later entries crossing through a freshly-created symlink into
+/// territory outside the output root is out of scope here).
+///
+/// When `existed` is true, any existing path at `out_path` is removed first,
+/// because `symlink(2)` fails if the target already exists.
+fn extract_symlink_entry(
+    entry: &mut zip::read::ZipFile<'_, fs_err::File>,
+    out_path: &Utf8Path,
+    existed: bool,
+    dest_path: &Utf8Path,
+) -> Result<u64> {
+    let mut target_bytes = Vec::with_capacity(entry.size() as usize);
+    io::copy(entry, &mut target_bytes)?;
+    let target = std::str::from_utf8(&target_bytes)
+        .map_err(|_| Error::InvalidUtf8Path(dest_path.to_string()))?;
+
+    if Utf8Path::new(target).is_absolute() {
+        return Err(Error::PathTraversal(format!(
+            "symlink {dest_path} -> {target}"
+        )));
+    }
+
+    if existed {
+        fs_err::remove_file(out_path)?;
+    }
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, out_path)?;
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let mut f = fs_err::File::create(out_path)?;
+        f.write_all(target_bytes.as_slice())?;
+    }
+    Ok(target_bytes.len() as u64)
+}
+
 // ── Decompress ────────────────────────────────────────────────────────────────
 
 pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
@@ -153,7 +201,8 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                 if let Some(parent) = out_path.parent() {
                     fs_err::create_dir_all(parent)?;
                 }
-                if fs_err::symlink_metadata(&out_path).is_ok() {
+                let existed = fs_err::symlink_metadata(&out_path).is_ok();
+                if existed {
                     if let Some(ref suffix) = opts.backup_suffix {
                         let backup = Utf8PathBuf::from(format!("{out_path}{suffix}"));
                         fs_err::rename(&out_path, &backup)?;
@@ -171,18 +220,38 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                         return Err(Error::FileExists(out_path));
                     }
                 }
-                let unix_mode = entry.unix_mode();
-                let mut out_file = fs_err::File::create(&out_path)?;
-                let written = io::copy(&mut entry, &mut out_file)?;
-                #[cfg(unix)]
-                if opts.preserve_permissions
-                    && let Some(mode) = unix_mode
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs_err::set_permissions(&out_path, std::fs::Permissions::from_mode(mode))?;
+
+                if entry.is_symlink() {
+                    let written =
+                        extract_symlink_entry(&mut entry, &out_path, existed, &dest_path)?;
+                    opts.progress.set_entry(dest_path.as_str());
+                    opts.progress.inc(written);
+                } else {
+                    let unix_mode = entry.unix_mode();
+                    // If overwriting an existing symlink, remove it first so the
+                    // new file replaces the link rather than the link's target.
+                    if existed
+                        && fs_err::symlink_metadata(&out_path)?
+                            .file_type()
+                            .is_symlink()
+                    {
+                        fs_err::remove_file(&out_path)?;
+                    }
+                    let mut out_file = fs_err::File::create(&out_path)?;
+                    let written = io::copy(&mut entry, &mut out_file)?;
+                    #[cfg(unix)]
+                    if opts.preserve_permissions
+                        && let Some(mode) = unix_mode
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs_err::set_permissions(
+                            &out_path,
+                            std::fs::Permissions::from_mode(mode & 0o7777),
+                        )?;
+                    }
+                    opts.progress.set_entry(dest_path.as_str());
+                    opts.progress.inc(written);
                 }
-                opts.progress.set_entry(dest_path.as_str());
-                opts.progress.inc(written);
             }
             Ok(())
         },
