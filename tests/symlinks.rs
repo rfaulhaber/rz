@@ -75,6 +75,59 @@ fn tar_follow_symlinks_dereferences() -> TestResult {
 }
 
 #[test]
+fn tar_rejects_absolute_symlink_target() -> TestResult {
+    // Build a tar archive containing a symlink `evil` whose target is the
+    // absolute path `/tmp/rz-escape`.  Extraction must refuse this rather
+    // than silently creating the symlink.
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let archive = tmp.join("evil.tar");
+    {
+        let file = fs_err::File::create(&archive)?;
+        let mut builder = ::tar::Builder::new(file);
+        let mut header = ::tar::Header::new_gnu();
+        header.set_entry_type(::tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_cksum();
+        builder.append_link(&mut header, "evil", "/tmp/rz-escape")?;
+        builder.finish()?;
+    }
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    let res = rz::tar::decompress(&archive, &out, &decompress_opts());
+    assert!(res.is_err(), "extraction should reject absolute symlink target");
+    Ok(())
+}
+
+#[test]
+fn tar_rejects_parent_dir_symlink_target() -> TestResult {
+    // Same idea with `../../etc/passwd`, which is how real zip-slip symlink
+    // attacks are typically packaged.
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let archive = tmp.join("evil.tar");
+    {
+        let file = fs_err::File::create(&archive)?;
+        let mut builder = ::tar::Builder::new(file);
+        let mut header = ::tar::Header::new_gnu();
+        header.set_entry_type(::tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_cksum();
+        builder.append_link(&mut header, "evil", "../../etc/passwd")?;
+        builder.finish()?;
+    }
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    let res = rz::tar::decompress(&archive, &out, &decompress_opts());
+    assert!(res.is_err(), "extraction should reject ..-containing symlink target");
+    Ok(())
+}
+
+#[test]
 fn tar_handles_broken_symlink() -> TestResult {
     let (_guard, tmp) = temp_utf8_dir()?;
 

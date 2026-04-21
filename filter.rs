@@ -281,6 +281,28 @@ pub fn safe_entry_path(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate that a symlink/hardlink target doesn't escape the output directory.
+///
+/// The `tar` crate's default `Entry::unpack` will happily create a symlink
+/// with an absolute or `..`-containing target, which opens a path-traversal
+/// hole: a subsequent entry whose name resolves *through* the symlink writes
+/// outside the extraction root.
+///
+/// Rejecting absolute paths and any `..` in targets closes the common
+/// attack vector.  Legitimate intra-archive symlinks (e.g. `bin/sh ->
+/// busybox`) remain valid.
+pub fn safe_link_target(link: &str, target: &str) -> Result<()> {
+    if Utf8Path::new(target).is_absolute() {
+        return Err(Error::PathTraversal(format!("{link} -> {target}")));
+    }
+    for component in Utf8Path::new(target).components() {
+        if matches!(component, camino::Utf8Component::ParentDir) {
+            return Err(Error::PathTraversal(format!("{link} -> {target}")));
+        }
+    }
+    Ok(())
+}
+
 // ── Symlink helper ──────────────────────────────────────────────────────────
 
 /// Read file metadata, optionally following symlinks.
@@ -572,12 +594,24 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         // Reject entries that attempt path traversal.
         safe_entry_path(orig_path.as_str())?;
 
+        // Validate symlink/hardlink targets — the tar crate's unpack() will
+        // happily create a symlink to `../../etc/passwd`, which a follow-up
+        // entry can then be extracted through.
+        let entry_type = entry.header().entry_type();
+        if matches!(entry_type, tar::EntryType::Symlink | tar::EntryType::Link)
+            && let Some(target) = entry.link_name()?
+        {
+            let target = Utf8PathBuf::try_from(target.into_owned())
+                .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+            safe_link_target(orig_path.as_str(), target.as_str())?;
+        }
+
         // Include/exclude check against the original (pre-strip) path.
         if !should_extract(orig_path.as_str(), &opts.includes, &opts.excludes) {
             continue;
         }
 
-        let is_dir = entry.header().entry_type().is_dir();
+        let is_dir = entry_type.is_dir();
 
         // --no-directory: skip directory entries, flatten file paths.
         if opts.no_directory && is_dir {
