@@ -835,4 +835,77 @@ mod tests {
         assert_eq!(s.map(|s| s.is_match("src/node_modules/foo")), Some(true),);
         assert_eq!(s.map(|s| s.is_match("src/other")), Some(false));
     }
+
+    // ── safe_entry_path ──────────────────────────────────────────────────
+
+    #[test]
+    fn safe_entry_path_accepts_plain_relative() {
+        assert!(safe_entry_path("a/b/c.txt").is_ok());
+        assert!(safe_entry_path("file").is_ok());
+        assert!(safe_entry_path("deep/nested/dir/x.log").is_ok());
+    }
+
+    #[test]
+    fn safe_entry_path_rejects_absolute() {
+        assert!(safe_entry_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn safe_entry_path_rejects_parent_traversal() {
+        assert!(safe_entry_path("../etc/passwd").is_err());
+        assert!(safe_entry_path("a/../b").is_err());
+        assert!(safe_entry_path("a/b/..").is_err());
+    }
+
+    #[test]
+    fn safe_entry_path_accepts_current_dir_prefix() {
+        // "./foo" is harmless and sometimes appears in legitimate archives.
+        assert!(safe_entry_path("./foo").is_ok());
+    }
+
+    // ── safe_link_target ─────────────────────────────────────────────────
+
+    #[test]
+    fn safe_link_target_accepts_relative_intra_archive() {
+        assert!(safe_link_target("bin/sh", "busybox").is_ok());
+        assert!(safe_link_target("a/link", "b/target").is_ok());
+    }
+
+    #[test]
+    fn safe_link_target_rejects_absolute() {
+        assert!(safe_link_target("link", "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn safe_link_target_rejects_parent_traversal() {
+        assert!(safe_link_target("link", "../etc/passwd").is_err());
+        assert!(safe_link_target("a/link", "../../etc").is_err());
+    }
+
+    // ── should_extract ───────────────────────────────────────────────────
+
+    #[test]
+    fn should_extract_excludes_take_precedence_over_includes() {
+        // Include *.txt but exclude secret.txt — exclude wins.
+        let includes = build_glob_set(&["*.txt".to_owned()]).unwrap_or(GlobSet::empty());
+        let excludes = build_glob_set(&["secret.txt".to_owned()]).unwrap_or(GlobSet::empty());
+        assert!(should_extract("notes.txt", &includes, &excludes));
+        assert!(!should_extract("secret.txt", &includes, &excludes));
+    }
+
+    #[test]
+    fn should_extract_empty_includes_means_include_all() {
+        // When no includes are specified, everything not excluded matches.
+        let includes = GlobSet::empty();
+        let excludes = build_glob_set(&["*.log".to_owned()]).unwrap_or(GlobSet::empty());
+        assert!(should_extract("any.txt", &includes, &excludes));
+        assert!(!should_extract("debug.log", &includes, &excludes));
+    }
+
+    #[test]
+    fn should_extract_non_matching_include_filters_out() {
+        let includes = build_glob_set(&["*.txt".to_owned()]).unwrap_or(GlobSet::empty());
+        let excludes = GlobSet::empty();
+        assert!(!should_extract("something.bin", &includes, &excludes));
+    }
 }

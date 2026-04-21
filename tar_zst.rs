@@ -245,3 +245,81 @@ impl<R: io::Read> io::Read for MultiFrameDecoder<R> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Cursor, Read};
+
+    use ruzstd::encoding::{CompressionLevel, compress};
+
+    use super::MultiFrameDecoder;
+
+    /// Compress `data` as a single zstd frame using the same encoder the
+    /// production code uses for each parallel block.
+    fn encode_frame(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        compress(Cursor::new(data), &mut out, CompressionLevel::Fastest);
+        out
+    }
+
+    #[test]
+    fn decodes_single_frame() -> io::Result<()> {
+        let payload = b"hello multi-frame world".repeat(10);
+        let encoded = encode_frame(&payload);
+        let mut decoded = Vec::new();
+        MultiFrameDecoder::new(Cursor::new(&encoded))?.read_to_end(&mut decoded)?;
+        assert_eq!(decoded, payload);
+        Ok(())
+    }
+
+    #[test]
+    fn decodes_concatenated_frames() -> io::Result<()> {
+        // Simulate the output of `compress_parallel` — multiple independent
+        // frames written back-to-back into a single stream.
+        let a = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec();
+        let b = b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_vec();
+        let c = b"cccccccccccccccccccccccccccccc".to_vec();
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&encode_frame(&a));
+        stream.extend_from_slice(&encode_frame(&b));
+        stream.extend_from_slice(&encode_frame(&c));
+
+        let mut decoded = Vec::new();
+        MultiFrameDecoder::new(Cursor::new(&stream))?.read_to_end(&mut decoded)?;
+
+        let mut expected = a.clone();
+        expected.extend_from_slice(&b);
+        expected.extend_from_slice(&c);
+        assert_eq!(decoded, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn small_buffer_reads_across_frame_boundary() -> io::Result<()> {
+        // Read with a tiny buffer so we force the state machine to transition
+        // Active -> Between -> Active multiple times.
+        let chunks: Vec<Vec<u8>> = (0..4).map(|i| vec![b'a' + i; 128]).collect();
+        let mut stream = Vec::new();
+        for chunk in &chunks {
+            stream.extend_from_slice(&encode_frame(chunk));
+        }
+
+        let mut decoder = MultiFrameDecoder::new(Cursor::new(&stream))?;
+        let mut decoded = Vec::new();
+        let mut small = [0u8; 7]; // deliberately awkward size
+        loop {
+            let n = decoder.read(&mut small)?;
+            if n == 0 {
+                break;
+            }
+            decoded.extend_from_slice(&small[..n]);
+        }
+
+        let mut expected = Vec::new();
+        for chunk in &chunks {
+            expected.extend_from_slice(chunk);
+        }
+        assert_eq!(decoded, expected);
+        Ok(())
+    }
+}
