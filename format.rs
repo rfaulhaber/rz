@@ -1,7 +1,28 @@
+use std::fmt;
+
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::cmd::Format;
 use crate::error::{Error, Result};
+
+impl fmt::Display for Format {
+    /// User-facing name matching the kebab-case `--format` clap value, so
+    /// error messages are actionable — if the error says `tar-gz`, the user
+    /// can pass `--format tar-gz` verbatim.  (Use `extension()` when you want
+    /// the dotted filename suffix instead.)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Zip => "zip",
+            Self::Tar => "tar",
+            Self::TarGz => "tar-gz",
+            Self::TarZst => "tar-zst",
+            Self::TarXz => "tar-xz",
+            Self::TarBz2 => "tar-bz2",
+            Self::SevenZ => "seven-z",
+        };
+        f.write_str(s)
+    }
+}
 
 /// Case-insensitive suffix check on ASCII bytes.  Equivalent to
 /// `s.to_ascii_lowercase().ends_with(suffix)` but without the allocation.

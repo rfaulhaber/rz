@@ -127,7 +127,7 @@ fn run(cli: Cli) -> Result<()> {
             };
 
             if to_stdout && requires_seek(&fmt) {
-                return Err(Error::StdoutNotSupported(format!("{:?}", fmt)));
+                return Err(Error::StdoutNotSupported(fmt.to_string()));
             }
 
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !to_stdout {
@@ -165,7 +165,7 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarXz => tar_xz::compress_to_writer(&input, stdout, &opts)?,
                     #[cfg(feature = "bzip2")]
                     Format::TarBz2 => tar_bz2::compress_to_writer(&input, stdout, &opts)?,
-                    _ => return Err(Error::StdoutNotSupported(format!("{:?}", fmt))),
+                    _ => return Err(Error::StdoutNotSupported(fmt.to_string())),
                 }
             } else {
                 let output = match output {
@@ -182,7 +182,7 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarBz2 => tar_bz2::compress(&input, &output, &opts)?,
                     Format::SevenZ => seven_z::compress(&input, &output, &opts)?,
                     #[allow(unreachable_patterns)]
-                    other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                    other => return Err(Error::UnsupportedFormat(other.to_string())),
                 }
             }
             progress.finish();
@@ -225,7 +225,7 @@ fn run(cli: Cli) -> Result<()> {
             };
 
             if from_stdin && requires_seek(&fmt) {
-                return Err(Error::StdinNotSupported(format!("{:?}", fmt)));
+                return Err(Error::StdinNotSupported(fmt.to_string()));
             }
 
             let excludes = filter::build_excludes(exclude, &exclude_from)?;
@@ -247,7 +247,7 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarBz2 => tar_bz2::list(&input)?,
                     Format::SevenZ => seven_z::list(&input)?,
                     #[allow(unreachable_patterns)]
-                    other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                    other => return Err(Error::UnsupportedFormat(other.to_string())),
                 };
                 let mut stdout = std::io::stdout().lock();
                 for entry in &entries {
@@ -320,7 +320,7 @@ fn run(cli: Cli) -> Result<()> {
                         Format::TarBz2 => {
                             tar_bz2::decompress_reader_to_writer(stdin, &mut stdout, &opts)?
                         }
-                        _ => return Err(Error::StdinNotSupported(format!("{:?}", fmt))),
+                        _ => return Err(Error::StdinNotSupported(fmt.to_string())),
                     }
                 } else {
                     match fmt {
@@ -339,7 +339,7 @@ fn run(cli: Cli) -> Result<()> {
                             seven_z::decompress_to_writer(&input, &mut stdout, &opts)?
                         }
                         #[allow(unreachable_patterns)]
-                        other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                        other => return Err(Error::UnsupportedFormat(other.to_string())),
                     }
                 }
             } else if from_stdin {
@@ -356,7 +356,7 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarXz => tar_xz::decompress_from_reader(stdin, &output, &opts)?,
                     #[cfg(feature = "bzip2")]
                     Format::TarBz2 => tar_bz2::decompress_from_reader(stdin, &output, &opts)?,
-                    _ => return Err(Error::StdinNotSupported(format!("{:?}", fmt))),
+                    _ => return Err(Error::StdinNotSupported(fmt.to_string())),
                 }
             } else {
                 let output = output.unwrap_or_else(|| ".".into());
@@ -370,7 +370,7 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarBz2 => tar_bz2::decompress(&input, &output, &opts)?,
                     Format::SevenZ => seven_z::decompress(&input, &output, &opts)?,
                     #[allow(unreachable_patterns)]
-                    other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                    other => return Err(Error::UnsupportedFormat(other.to_string())),
                 }
             }
             progress.finish();
@@ -405,7 +405,7 @@ fn run(cli: Cli) -> Result<()> {
                 Format::TarBz2 => tar_bz2::list(&input)?,
                 Format::SevenZ => seven_z::list(&input)?,
                 #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                other => return Err(Error::UnsupportedFormat(other.to_string())),
             };
 
             let excludes = filter::build_excludes(exclude, &exclude_from)?;
@@ -470,7 +470,7 @@ fn run(cli: Cli) -> Result<()> {
                 Format::TarBz2 => tar_bz2::test(&input, progress)?,
                 Format::SevenZ => seven_z::test(&input, progress)?,
                 #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                other => return Err(Error::UnsupportedFormat(other.to_string())),
             }
             progress.finish();
             if !cli.quiet {
@@ -496,7 +496,7 @@ fn run(cli: Cli) -> Result<()> {
                 Format::TarBz2 => tar_bz2::info(&input)?,
                 Format::SevenZ => seven_z::info(&input)?,
                 #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(format!("{:?}", other))),
+                other => return Err(Error::UnsupportedFormat(other.to_string())),
             };
 
             let mut stdout = std::io::stdout().lock();

@@ -49,8 +49,8 @@ pub enum Error {
     PathTraversal(String),
 
     #[error(
-        "zstd (pure Rust) only supports --level 0 (uncompressed); \
-             custom compression levels require a build with C bindings"
+        "zstd: the pure-Rust encoder only accepts --level 0 (store, no \
+         compression); omit --level to use the default fast-compression mode"
     )]
     ZstdLevelUnsupported,
 }
