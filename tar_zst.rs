@@ -71,6 +71,14 @@ fn parallel_zst_compress<W: io::Write>(
     writer: &mut W,
     level: CompressionLevel,
 ) -> io::Result<()> {
+    // For inputs at or below a single block, skip rayon dispatch entirely.
+    // Concatenated frames are fine, but a single frame with no intermediate
+    // Vec<Vec<u8>> and no thread-pool setup is strictly cheaper.
+    if data.len() <= PARALLEL_BLOCK_SIZE {
+        ruzstd::encoding::compress(Cursor::new(data), writer, level);
+        return Ok(());
+    }
+
     let compressed: Vec<Vec<u8>> = data
         .par_chunks(PARALLEL_BLOCK_SIZE)
         .map(|chunk| {

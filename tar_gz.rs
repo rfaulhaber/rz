@@ -69,7 +69,19 @@ pub fn compress_to_writer<W: std::io::Write>(
 /// Splits input into independently-compressed blocks and concatenates the
 /// results. Concatenated gzip streams are valid per RFC 1952 — decompressors
 /// transparently join them.
+///
+/// For inputs at or below a single block, takes the single-threaded path to
+/// avoid rayon dispatch overhead (work-stealing thread-pool + intermediate
+/// `Vec<Vec<u8>>`) that only pays off when there are multiple blocks in
+/// flight.
 fn parallel_gz_compress<W: io::Write>(data: &[u8], writer: &mut W, level: u32) -> io::Result<()> {
+    if data.len() <= PARALLEL_BLOCK_SIZE {
+        let mut enc = GzEncoder::new(writer, Compression::new(level));
+        io::Write::write_all(&mut enc, data)?;
+        enc.finish()?;
+        return Ok(());
+    }
+
     let compressed: Vec<Vec<u8>> = data
         .par_chunks(PARALLEL_BLOCK_SIZE)
         .map(|chunk| {
