@@ -220,7 +220,13 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
     Ok(ArchiveInfo {
         format: "7z",
         entry_count: archive.files.len(),
-        total_uncompressed: archive.files.iter().map(|f| f.size).sum(),
+        // Saturating fold — `Iterator::sum` on u64 panics on overflow in
+        // debug and wraps in release; either is a bad outcome for a
+        // potentially adversarial archive.
+        total_uncompressed: archive
+            .files
+            .iter()
+            .fold(0u64, |acc, f| acc.saturating_add(f.size)),
         compressed_size,
     })
 }

@@ -556,8 +556,10 @@ pub fn count_tar_entries<R: std::io::Read>(archive: &mut tar::Archive<R>) -> Res
     let mut total_uncompressed: u64 = 0;
     for entry in archive.entries()? {
         let entry = entry?;
-        total_uncompressed += entry.header().size()?;
-        entry_count += 1;
+        // Saturating to guard against adversarial archives with absurd
+        // header-declared sizes summing past u64::MAX.
+        total_uncompressed = total_uncompressed.saturating_add(entry.header().size()?);
+        entry_count = entry_count.saturating_add(1);
     }
     Ok((entry_count, total_uncompressed))
 }

@@ -362,10 +362,13 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
     let total_uncompressed = match archive.decompressed_size() {
         Some(size) => u64::try_from(size).unwrap_or(u64::MAX),
         None => {
+            // Saturating add — a corrupt or adversarial archive could claim
+            // per-entry sizes that sum past u64::MAX; we report u64::MAX in
+            // that case rather than panicking (debug) or wrapping (release).
             let mut total: u64 = 0;
             for i in 0..entry_count {
                 let entry = archive.by_index_raw(i)?;
-                total += entry.size();
+                total = total.saturating_add(entry.size());
             }
             total
         }

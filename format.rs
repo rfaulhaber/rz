@@ -91,12 +91,13 @@ impl Format {
     }
 
     /// Derive a default output path from the first input and the format's extension.
+    ///
+    /// Degenerate inputs (`/`, `.`, `..`, empty, paths ending in `..`) have no
+    /// meaningful file name; rather than emitting something like `..tar.gz`,
+    /// fall back to `archive` so the user still gets a usable name.
     pub fn default_output(&self, first_input: &Utf8Path) -> Utf8PathBuf {
-        let stem = first_input.file_name().unwrap_or(first_input.as_str());
-        let mut out = Utf8PathBuf::from(stem);
-        let ext = self.extension();
-        out.set_file_name(format!("{stem}{ext}"));
-        out
+        let stem = first_input.file_name().unwrap_or("archive");
+        Utf8PathBuf::from(format!("{stem}{}", self.extension()))
     }
 }
 
@@ -287,6 +288,37 @@ mod tests {
     fn default_output_strips_parent_directory() {
         let out = Format::Zip.default_output(Utf8Path::new("/home/user/mydir"));
         assert_eq!(out, Utf8PathBuf::from("mydir.zip"));
+    }
+
+    #[test]
+    fn default_output_root_falls_back_to_archive() {
+        let out = Format::TarGz.default_output(Utf8Path::new("/"));
+        assert_eq!(out, Utf8PathBuf::from("archive.tar.gz"));
+    }
+
+    #[test]
+    fn default_output_dot_falls_back_to_archive() {
+        let out = Format::Zip.default_output(Utf8Path::new("."));
+        assert_eq!(out, Utf8PathBuf::from("archive.zip"));
+    }
+
+    #[test]
+    fn default_output_parent_falls_back_to_archive() {
+        let out = Format::TarZst.default_output(Utf8Path::new(".."));
+        assert_eq!(out, Utf8PathBuf::from("archive.tar.zst"));
+    }
+
+    #[test]
+    fn default_output_empty_falls_back_to_archive() {
+        let out = Format::SevenZ.default_output(Utf8Path::new(""));
+        assert_eq!(out, Utf8PathBuf::from("archive.7z"));
+    }
+
+    #[test]
+    fn default_output_trailing_slash_uses_basename() {
+        // "foo/" — the file name component is "foo".
+        let out = Format::TarBz2.default_output(Utf8Path::new("foo/"));
+        assert_eq!(out, Utf8PathBuf::from("foo.tar.bz2"));
     }
 
     // ── resolve_compress_format ──────────────────────────────────────────
