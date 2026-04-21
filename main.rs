@@ -232,7 +232,7 @@ fn run(cli: Cli) -> Result<()> {
             let includes = {
                 let mut all_includes = include;
                 all_includes.extend(paths);
-                filter::build_include_set(&all_includes)?
+                filter::build_glob_set(&all_includes)?
             };
 
             // Dry-run: list what would be extracted and exit.

@@ -24,31 +24,14 @@ pub fn should_extract(path: &str, includes: &GlobSet, excludes: &GlobSet) -> boo
     true
 }
 
-/// Build a [`GlobSet`] from include patterns.
+/// Build a [`GlobSet`] from glob patterns (used for both include and exclude
+/// rules — semantics are identical, only the caller's interpretation differs).
 ///
-/// Uses the same `**/` prefix logic as [`build_exclude_set`] so bare patterns
-/// match at any directory depth.
-pub fn build_include_set(patterns: &[String]) -> Result<GlobSet> {
-    // Reuse the same glob-building logic as excludes.
-    build_glob_set(patterns)
-}
-
-/// Build a [`GlobSet`] from exclude patterns.
-///
-/// Patterns without a `/` are automatically prefixed with `**/` so they match
-/// at any directory depth (matching `tar --exclude` behaviour).  Each pattern
-/// also generates a `<pattern>/**` variant so that excluding a directory name
-/// also excludes everything inside it.
-pub fn build_exclude_set(patterns: &[String]) -> Result<GlobSet> {
-    build_glob_set(patterns)
-}
-
-/// Build a [`GlobSet`] from glob patterns.
-///
-/// Bare patterns (without `/`) are prefixed with `**/` for recursive matching.
-/// Each pattern also generates a `<pattern>/**` variant to match directory
-/// contents.
-fn build_glob_set(patterns: &[String]) -> Result<GlobSet> {
+/// Bare patterns (without `/`) are prefixed with `**/` so they match at any
+/// directory depth (matching `tar --exclude` behaviour).  Each pattern also
+/// generates a `<pattern>/**` variant so that matching a directory name also
+/// matches everything inside it.
+pub fn build_glob_set(patterns: &[String]) -> Result<GlobSet> {
     if patterns.is_empty() {
         return Ok(GlobSet::empty());
     }
@@ -689,7 +672,7 @@ pub fn build_excludes(patterns: Vec<String>, pattern_files: &[Utf8PathBuf]) -> R
     for path in pattern_files {
         all.extend(read_patterns_from_file(path)?);
     }
-    build_exclude_set(&all)
+    build_glob_set(&all)
 }
 
 // ── Pattern / path file readers ─────────────────────────────────────────────
@@ -813,11 +796,11 @@ mod tests {
         );
     }
 
-    // ── build_exclude_set ────────────────────────────────────────────────
+    // ── build_glob_set ────────────────────────────────────────────────
 
     #[test]
     fn empty_patterns_never_match() {
-        let set = build_exclude_set(&[]).ok();
+        let set = build_glob_set(&[]).ok();
         assert!(set.is_some());
         let set = set.map(|s| s.is_match("anything"));
         assert_eq!(set, Some(false));
@@ -825,18 +808,18 @@ mod tests {
 
     #[test]
     fn star_pattern_matches_at_any_depth() {
-        let set = build_exclude_set(&["*.log".to_owned()]).ok();
+        let set = build_glob_set(&["*.log".to_owned()]).ok();
         assert!(set.is_some());
         let set = set.as_ref().map(|s| s.is_match("foo.log"));
         assert_eq!(set, Some(true));
-        let set2 = build_exclude_set(&["*.log".to_owned()]).ok();
+        let set2 = build_glob_set(&["*.log".to_owned()]).ok();
         let set2 = set2.as_ref().map(|s| s.is_match("dir/foo.log"));
         assert_eq!(set2, Some(true));
     }
 
     #[test]
     fn directory_name_excludes_children() {
-        let set = build_exclude_set(&["node_modules".to_owned()]).ok();
+        let set = build_glob_set(&["node_modules".to_owned()]).ok();
         assert!(set.is_some());
         let s = set.as_ref();
         assert_eq!(s.map(|s| s.is_match("node_modules")), Some(true));

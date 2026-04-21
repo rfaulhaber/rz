@@ -4,7 +4,7 @@ use camino::Utf8Path;
 use globset::GlobSet;
 
 use helpers::{TAR_GZ, TestResult, ZIP, build_file_tree, temp_utf8_dir};
-use rz::filter::build_exclude_set;
+use rz::filter::build_glob_set;
 use rz::{CompressOpts, DecompressOpts};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -12,7 +12,7 @@ use rz::{CompressOpts, DecompressOpts};
 fn compress_opts(excludes: &[&str]) -> CompressOpts<'static> {
     CompressOpts::new(
         None,
-        build_exclude_set(&excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+        build_glob_set(&excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
             .unwrap_or_else(|_| GlobSet::empty()),
     )
 }
@@ -22,7 +22,7 @@ fn decompress_opts(strip: u32, excludes: &[&str]) -> DecompressOpts<'static> {
         false,
         strip,
         GlobSet::empty(),
-        build_exclude_set(&excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
+        build_glob_set(&excludes.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>())
             .unwrap_or_else(|_| GlobSet::empty()),
     )
 }
