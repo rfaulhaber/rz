@@ -69,9 +69,7 @@ impl BarProgress {
         bar.enable_steady_tick(std::time::Duration::from_millis(120));
         Self { bar }
     }
-}
 
-impl BarProgress {
     /// Create a hidden progress bar that tracks bytes but renders nothing.
     /// Useful for `--totals` without `--progress`.
     pub fn hidden() -> Self {

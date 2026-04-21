@@ -36,6 +36,12 @@ pub enum Error {
     #[error("--strip-components is not supported for {0} format")]
     StripComponentsUnsupported(String),
 
+    #[error(
+        "--keep-newer is not supported for {0} format (entries lack reliable \
+         mtime metadata); use --no-overwrite if you want to skip existing files"
+    )]
+    KeepNewerUnsupported(String),
+
     #[error("{0} format does not support reading from stdin (requires seekable input)")]
     StdinNotSupported(String),
 

@@ -8,14 +8,14 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 /// specific to 7z because every other backend streams entries through a
 /// filter loop unconditionally.
 fn can_fast_path(opts: &DecompressOpts<'_>) -> bool {
+    // `keep_newer` and `strip_components` are rejected up-front in decompress,
+    // so we don't need to check them here.
     opts.force
         && opts.includes.is_empty()
         && opts.excludes.is_empty()
         && !opts.no_overwrite
-        && !opts.keep_newer
         && !opts.no_directory
         && opts.backup_suffix.is_none()
-        && opts.strip_components == 0
         && !opts.preserve_permissions
 }
 
@@ -73,6 +73,12 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     if opts.strip_components > 0 {
         return Err(Error::StripComponentsUnsupported("7z".to_owned()));
     }
+    // sevenz-rust2 entries do not expose reliable mtime metadata, so we
+    // can't implement --keep-newer with real newness semantics; refuse
+    // rather than silently degrading to "skip existing".
+    if opts.keep_newer {
+        return Err(Error::KeepNewerUnsupported("7z".to_owned()));
+    }
     // Use the fast path only when force is set and no filtering/special
     // options are active.  Otherwise we need the callback to enforce
     // overwrite guards, include/exclude, and backup logic.
@@ -108,9 +114,6 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                     let backup_name = format!("{}{suffix}", out_path.display());
                     fs_err::rename(&out_path, Utf8Path::new(&backup_name))
                         .map_err(|e| sevenz_rust2::Error::Io(e, backup_name.into()))?;
-                } else if opts.keep_newer {
-                    // 7z entries don't reliably expose mtime; skip if file exists.
-                    return Ok(true);
                 } else if opts.no_overwrite {
                     return Ok(true);
                 } else if !opts.force {
