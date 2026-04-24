@@ -53,6 +53,10 @@ pub struct CompressOpts<'a> {
     pub fixed_gid: Option<u64>,
     /// Override permission mode on all entries (low 12 bits).
     pub fixed_mode: Option<u32>,
+    /// Include only entries with mtime strictly greater than this (unix seconds).
+    pub newer_than: Option<i64>,
+    /// Include only entries with mtime strictly less than this (unix seconds).
+    pub older_than: Option<i64>,
 }
 
 /// Options for decompress operations.
@@ -68,6 +72,10 @@ pub struct DecompressOpts<'a> {
     pub preserve_permissions: bool,
     /// Restore owner/group on extracted entries (tar-family only).
     pub same_owner: bool,
+    /// Extract only entries with mtime strictly greater than this (unix seconds).
+    pub newer_than: Option<i64>,
+    /// Extract only entries with mtime strictly less than this (unix seconds).
+    pub older_than: Option<i64>,
     pub progress: &'a dyn ProgressReport,
 }
 
@@ -85,6 +93,8 @@ impl CompressOpts<'_> {
             fixed_uid: None,
             fixed_gid: None,
             fixed_mode: None,
+            newer_than: None,
+            older_than: None,
         }
     }
 }
@@ -108,6 +118,8 @@ impl DecompressOpts<'_> {
             backup_suffix: None,
             preserve_permissions: false,
             same_owner: false,
+            newer_than: None,
+            older_than: None,
             progress: &NoProgress,
         }
     }

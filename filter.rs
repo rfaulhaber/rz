@@ -322,6 +322,12 @@ pub fn extract_tar_to_writer<R: std::io::Read, W: std::io::Write>(
             continue;
         }
 
+        // Time-window filter against the archive's recorded mtime.
+        let entry_mtime = entry.header().mtime().unwrap_or(0) as i64;
+        if !passes_time_filter(entry_mtime, opts.newer_than, opts.older_than) {
+            continue;
+        }
+
         // Skip directory entries — only files have content.
         if entry.header().entry_type().is_dir() {
             continue;
@@ -494,6 +500,9 @@ pub fn append_dir_filtered<W: std::io::Write>(
             append_dir_entry(builder, &entry.fs_path, &entry.archive_name, opts)?;
         } else {
             let meta = input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+            if !passes_time_filter(fs_mtime_secs(&meta), opts.newer_than, opts.older_than) {
+                return Ok(());
+            }
             append_file_entry(builder, &entry.fs_path, &entry.archive_name, opts)?;
             opts.progress.set_entry(&entry.archive_name);
             opts.progress.inc(meta.len());
@@ -519,6 +528,9 @@ pub fn append_inputs<W: std::io::Write>(
         if meta.is_dir() {
             append_dir_filtered(builder, input, name, opts)?;
         } else {
+            if !passes_time_filter(fs_mtime_secs(&meta), opts.newer_than, opts.older_than) {
+                continue;
+            }
             let size = meta.len();
             append_file_entry(builder, input, name, opts)?;
             opts.progress.set_entry(name);
@@ -605,6 +617,12 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             continue;
         }
 
+        // Time-window filter against the archive's recorded mtime.
+        let entry_mtime = entry.header().mtime().unwrap_or(0) as i64;
+        if !passes_time_filter(entry_mtime, opts.newer_than, opts.older_than) {
+            continue;
+        }
+
         let is_dir = entry_type.is_dir();
 
         // --no-directory: skip directory entries, flatten file paths.
@@ -658,6 +676,41 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         opts.progress.inc(size);
     }
     Ok(())
+}
+
+/// Decide whether an entry with the given mtime (unix seconds) falls within
+/// the `[newer_than, older_than]` window supplied via CLI flags.
+///
+/// Both bounds are exclusive, matching GNU tar's `--newer` / `--newer-mtime`
+/// semantics: `--newer-than 2024-01-01` excludes files modified exactly at
+/// midnight on that date.  Negative mtimes (pre-epoch) are impossible from
+/// filesystem metadata and tar headers, so the `as i64` cast is safe.
+pub fn passes_time_filter(
+    mtime_secs: i64,
+    newer_than: Option<i64>,
+    older_than: Option<i64>,
+) -> bool {
+    if let Some(after) = newer_than
+        && mtime_secs <= after
+    {
+        return false;
+    }
+    if let Some(before) = older_than
+        && mtime_secs >= before
+    {
+        return false;
+    }
+    true
+}
+
+/// Read filesystem mtime (unix seconds) from metadata, returning 0 if the
+/// platform cannot produce a sensible value.
+fn fs_mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Returns `true` when the file at `path` has an mtime >= the given unix
@@ -745,12 +798,20 @@ pub fn collect_compress_paths(
                     if entry.is_dir {
                         paths.push(format!("{}/", entry.archive_name));
                     } else {
+                        let entry_meta = input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+                        if !passes_time_filter(
+                            fs_mtime_secs(&entry_meta),
+                            opts.newer_than,
+                            opts.older_than,
+                        ) {
+                            return Ok(());
+                        }
                         paths.push(entry.archive_name);
                     }
                     Ok(())
                 })?;
             }
-        } else {
+        } else if passes_time_filter(fs_mtime_secs(&meta), opts.newer_than, opts.older_than) {
             paths.push(name.to_owned());
         }
     }

@@ -44,6 +44,8 @@ fn reject_reproducibility_for_non_tar(
     owner: Option<u64>,
     group: Option<u64>,
     mode: Option<u32>,
+    newer_than: Option<i64>,
+    older_than: Option<i64>,
 ) -> Result<()> {
     let is_tar_family = matches!(
         fmt,
@@ -65,6 +67,8 @@ fn reject_reproducibility_for_non_tar(
     check("--owner", owner.is_some())?;
     check("--group", group.is_some())?;
     check("--mode", mode.is_some())?;
+    check("--newer-than", newer_than.is_some())?;
+    check("--older-than", older_than.is_some())?;
     Ok(())
 }
 
@@ -111,6 +115,8 @@ fn run(cli: Cli) -> Result<()> {
             owner,
             group,
             mode,
+            newer_than,
+            older_than,
         } => {
             let level = if store { Some(0) } else { level };
 
@@ -147,6 +153,8 @@ fn run(cli: Cli) -> Result<()> {
                     fixed_uid: owner,
                     fixed_gid: group,
                     fixed_mode: mode,
+                    newer_than,
+                    older_than,
                 };
                 let paths = filter::collect_compress_paths(&input, &dry_opts)?;
                 let mut stdout = std::io::stdout().lock();
@@ -173,7 +181,9 @@ fn run(cli: Cli) -> Result<()> {
             // or the writer doesn't expose per-entry overrides (sevenz-rust2).
             // Reject rather than silently no-op so users don't get misleading
             // results when chasing bit-for-bit reproducibility.
-            reject_reproducibility_for_non_tar(&fmt, mtime, owner, group, mode)?;
+            reject_reproducibility_for_non_tar(
+                &fmt, mtime, owner, group, mode, newer_than, older_than,
+            )?;
 
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !to_stdout {
                 Box::new(BarProgress::spinner())
@@ -200,6 +210,8 @@ fn run(cli: Cli) -> Result<()> {
                 fixed_uid: owner,
                 fixed_gid: group,
                 fixed_mode: mode,
+                newer_than,
+                older_than,
             };
 
             if to_stdout {
@@ -259,6 +271,8 @@ fn run(cli: Cli) -> Result<()> {
             suffix,
             preserve_permissions,
             same_owner,
+            newer_than,
+            older_than,
             totals,
             dry_run,
             paths,
@@ -336,14 +350,28 @@ fn run(cli: Cli) -> Result<()> {
             // --same-owner only applies to tar-family extraction (zip/7z
             // don't carry portable uid/gid).  Reject up front so users don't
             // assume ownership is being restored silently.
-            if same_owner
-                && !matches!(
-                    fmt,
-                    Format::Tar | Format::TarGz | Format::TarZst | Format::TarXz | Format::TarBz2
-                )
-            {
+            let is_tar_family = matches!(
+                fmt,
+                Format::Tar | Format::TarGz | Format::TarZst | Format::TarXz | Format::TarBz2
+            );
+            if same_owner && !is_tar_family {
                 return Err(Error::ReproducibilityFlagUnsupported {
                     flag: "--same-owner",
+                    format: fmt.to_string(),
+                });
+            }
+            // Time-based filters read the entry mtime from the tar header;
+            // zip and 7z entries don't expose reliable mtime through the
+            // current crates (sevenz-rust2 in particular).  Reject rather
+            // than silently returning no matches.
+            if !is_tar_family && (newer_than.is_some() || older_than.is_some()) {
+                let flag = if newer_than.is_some() {
+                    "--newer-than"
+                } else {
+                    "--older-than"
+                };
+                return Err(Error::ReproducibilityFlagUnsupported {
+                    flag,
                     format: fmt.to_string(),
                 });
             }
@@ -359,6 +387,8 @@ fn run(cli: Cli) -> Result<()> {
                 backup_suffix,
                 preserve_permissions,
                 same_owner,
+                newer_than,
+                older_than,
                 progress,
             };
 

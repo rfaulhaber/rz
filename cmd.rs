@@ -105,6 +105,15 @@ pub enum Command {
         /// Override permission mode on all entries (octal, e.g. 644)
         #[arg(long, value_parser = parse_octal_mode)]
         mode: Option<u32>,
+
+        /// Include only entries with mtime strictly newer than DATE
+        /// (RFC 3339, `YYYY-MM-DD`, or `@<unix-seconds>`; tar-family only)
+        #[arg(long, value_name = "DATE", value_parser = parse_date)]
+        newer_than: Option<i64>,
+
+        /// Include only entries with mtime strictly older than DATE (tar-family only)
+        #[arg(long, value_name = "DATE", value_parser = parse_date)]
+        older_than: Option<i64>,
     },
 
     /// Decompress an archive
@@ -176,6 +185,15 @@ pub enum Command {
         /// Restore original owner/group (Unix + root only)
         #[arg(long, visible_alias = "numeric-owner")]
         same_owner: bool,
+
+        /// Extract only entries with mtime strictly newer than DATE
+        /// (RFC 3339, `YYYY-MM-DD`, or `@<unix-seconds>`)
+        #[arg(long, value_name = "DATE", value_parser = parse_date)]
+        newer_than: Option<i64>,
+
+        /// Extract only entries with mtime strictly older than DATE
+        #[arg(long, value_name = "DATE", value_parser = parse_date)]
+        older_than: Option<i64>,
 
         /// Show what would be extracted without writing to disk
         #[arg(short = 'n', long)]
@@ -276,6 +294,41 @@ pub enum SortField {
     Name,
     Size,
     Date,
+}
+
+/// Parse a user-supplied date spec into a Unix timestamp (seconds since epoch).
+///
+/// Accepts three spellings, in order of preference:
+///   * `@<unix>` — literal seconds since the epoch, e.g. `@1700000000`
+///   * RFC 3339, e.g. `2024-01-02T03:04:05Z` or `2024-01-02T03:04:05+02:00`
+///   * Date-only `YYYY-MM-DD`, interpreted as midnight UTC
+///
+/// The result is i64-sign-extended so callers can express pre-1970 dates, but
+/// in practice every tar header stores a u64-ish mtime, so negatives get
+/// clamped later.
+pub fn parse_date(s: &str) -> std::result::Result<i64, String> {
+    if let Some(rest) = s.strip_prefix('@') {
+        return rest
+            .parse::<i64>()
+            .map_err(|e| format!("invalid unix timestamp `{s}`: {e}"));
+    }
+
+    // Try full RFC 3339 first — covers offsets and `Z`.
+    if let Ok(dt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339) {
+        return Ok(dt.unix_timestamp());
+    }
+
+    // Fall back to date-only (midnight UTC).
+    let date_fmt = time::macros::format_description!("[year]-[month]-[day]");
+    if let Ok(date) = time::Date::parse(s, date_fmt) {
+        let dt = date.with_hms(0, 0, 0).map_err(|e| e.to_string())?;
+        return Ok(dt.assume_utc().unix_timestamp());
+    }
+
+    Err(format!(
+        "invalid date `{s}` (expected RFC 3339 like \
+         `2024-01-02T03:04:05Z`, a date `2024-01-02`, or `@<unix-seconds>`)"
+    ))
 }
 
 /// Parse an octal permission mode.  Accepts `"644"`, `"0644"`, and `"0o644"`.
