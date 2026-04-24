@@ -97,7 +97,10 @@ fn tar_rejects_absolute_symlink_target() -> TestResult {
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
     let res = rz::tar::decompress(&archive, &out, &decompress_opts());
-    assert!(res.is_err(), "extraction should reject absolute symlink target");
+    assert!(
+        res.is_err(),
+        "extraction should reject absolute symlink target"
+    );
     Ok(())
 }
 
@@ -123,7 +126,10 @@ fn tar_rejects_parent_dir_symlink_target() -> TestResult {
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
     let res = rz::tar::decompress(&archive, &out, &decompress_opts());
-    assert!(res.is_err(), "extraction should reject ..-containing symlink target");
+    assert!(
+        res.is_err(),
+        "extraction should reject ..-containing symlink target"
+    );
     Ok(())
 }
 
@@ -202,7 +208,10 @@ fn zip_overwrites_existing_symlink_on_force() -> TestResult {
 
     let link = out.join("tree/link.txt");
     let meta = fs_err::symlink_metadata(&link)?;
-    assert!(meta.file_type().is_symlink(), "link.txt must still be a symlink");
+    assert!(
+        meta.file_type().is_symlink(),
+        "link.txt must still be a symlink"
+    );
     Ok(())
 }
 
