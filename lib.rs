@@ -51,6 +51,8 @@ pub struct CompressOpts<'a> {
     pub fixed_uid: Option<u64>,
     /// Override gid on all entries.
     pub fixed_gid: Option<u64>,
+    /// Override permission mode on all entries (low 12 bits).
+    pub fixed_mode: Option<u32>,
 }
 
 /// Options for decompress operations.
@@ -64,6 +66,8 @@ pub struct DecompressOpts<'a> {
     pub excludes: GlobSet,
     pub backup_suffix: Option<String>,
     pub preserve_permissions: bool,
+    /// Restore owner/group on extracted entries (tar-family only).
+    pub same_owner: bool,
     pub progress: &'a dyn ProgressReport,
 }
 
@@ -80,6 +84,7 @@ impl CompressOpts<'_> {
             fixed_mtime: None,
             fixed_uid: None,
             fixed_gid: None,
+            fixed_mode: None,
         }
     }
 }
@@ -102,6 +107,7 @@ impl DecompressOpts<'_> {
             excludes,
             backup_suffix: None,
             preserve_permissions: false,
+            same_owner: false,
             progress: &NoProgress,
         }
     }

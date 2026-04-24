@@ -368,7 +368,7 @@ pub fn verify_tar_entries<R: std::io::Read>(
     Ok(())
 }
 
-/// Apply reproducibility overrides (mtime, uid, gid) to a tar header.
+/// Apply reproducibility overrides (mtime, uid, gid, mode) to a tar header.
 fn apply_header_overrides(header: &mut tar::Header, opts: &CompressOpts<'_>) {
     if let Some(mtime) = opts.fixed_mtime {
         header.set_mtime(mtime);
@@ -379,11 +379,17 @@ fn apply_header_overrides(header: &mut tar::Header, opts: &CompressOpts<'_>) {
     if let Some(gid) = opts.fixed_gid {
         header.set_gid(gid);
     }
+    if let Some(mode) = opts.fixed_mode {
+        header.set_mode(mode);
+    }
 }
 
 /// Returns `true` when any reproducibility overrides are active.
 fn has_header_overrides(opts: &CompressOpts<'_>) -> bool {
-    opts.fixed_mtime.is_some() || opts.fixed_uid.is_some() || opts.fixed_gid.is_some()
+    opts.fixed_mtime.is_some()
+        || opts.fixed_uid.is_some()
+        || opts.fixed_gid.is_some()
+        || opts.fixed_mode.is_some()
 }
 
 /// Extract Unix permission mode from filesystem metadata.
@@ -396,11 +402,7 @@ fn metadata_mode(meta: &std::fs::Metadata) -> u32 {
     }
     #[cfg(not(unix))]
     {
-        if meta.is_dir() {
-            0o755
-        } else {
-            0o644
-        }
+        if meta.is_dir() { 0o755 } else { 0o644 }
     }
 }
 
@@ -572,6 +574,10 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
     opts: &DecompressOpts<'_>,
 ) -> Result<()> {
     archive.set_preserve_permissions(opts.preserve_permissions);
+    // Ownership restoration is tar-only and Unix + root only in practice;
+    // the tar crate silently skips chown when the process lacks CAP_CHOWN,
+    // matching GNU tar's non-root behaviour.
+    archive.set_preserve_ownerships(opts.same_owner);
 
     for entry in archive.entries()? {
         let mut entry = entry?;

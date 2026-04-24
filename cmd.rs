@@ -101,6 +101,10 @@ pub enum Command {
         /// Override group GID on all entries (e.g. 0 for root)
         #[arg(long)]
         group: Option<u64>,
+
+        /// Override permission mode on all entries (octal, e.g. 644)
+        #[arg(long, value_parser = parse_octal_mode)]
+        mode: Option<u32>,
     },
 
     /// Decompress an archive
@@ -168,6 +172,10 @@ pub enum Command {
         /// Restore original file permissions from archive metadata
         #[arg(short = 'P', long)]
         preserve_permissions: bool,
+
+        /// Restore original owner/group (Unix + root only)
+        #[arg(long, visible_alias = "numeric-owner")]
+        same_owner: bool,
 
         /// Show what would be extracted without writing to disk
         #[arg(short = 'n', long)]
@@ -268,4 +276,22 @@ pub enum SortField {
     Name,
     Size,
     Date,
+}
+
+/// Parse an octal permission mode.  Accepts `"644"`, `"0644"`, and `"0o644"`.
+/// Rejects values with set bits outside the low 12 bits (setuid/setgid/sticky
+/// plus the standard rwx triads).
+fn parse_octal_mode(s: &str) -> std::result::Result<u32, String> {
+    let stripped = s
+        .strip_prefix("0o")
+        .or_else(|| s.strip_prefix("0O"))
+        .unwrap_or(s);
+    let mode = u32::from_str_radix(stripped, 8)
+        .map_err(|e| format!("invalid octal mode `{s}`: {e}"))?;
+    if mode & !0o7777 != 0 {
+        return Err(format!(
+            "mode `{s}` has bits outside the 12-bit permission range (max 7777)"
+        ));
+    }
+    Ok(mode)
 }
