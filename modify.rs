@@ -178,7 +178,7 @@ fn tar_append(
     let buf = BufWriter::new(file);
     let mut builder = tar::Builder::new(buf);
     builder.follow_symlinks(opts.follow_symlinks);
-    filter::append_inputs(&mut builder, inputs, &opts)?;
+    append_inputs_with_index(&mut builder, inputs, &opts, archive_idx.as_ref())?;
     let buf = builder.into_inner()?;
     let file = buf.into_inner().map_err(std::io::Error::other)?;
     file.sync_all()?;
