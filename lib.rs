@@ -8,6 +8,7 @@ pub mod cmd;
 pub mod error;
 pub mod filter;
 pub mod format;
+pub mod modify;
 pub mod progress;
 pub mod seven_z;
 pub mod tar;

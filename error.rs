@@ -65,4 +65,13 @@ pub enum Error {
          compression); omit --level to use the default fast-compression mode"
     )]
     ZstdLevelUnsupported,
+
+    #[error(
+        "{operation} is not supported for {format} format \
+         (supported on tar-family and zip)"
+    )]
+    ModifyUnsupported {
+        operation: &'static str,
+        format: String,
+    },
 }

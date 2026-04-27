@@ -10,6 +10,7 @@ use rz::format::{resolve_compress_format, resolve_input_format};
 use rz::progress::{BarProgress, NoProgress, ProgressReport, VerboseReport};
 #[cfg(feature = "bzip2")]
 use rz::tar_bz2;
+use rz::modify::{self, AppendMode};
 use rz::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
 
 fn main() -> ExitCode {
@@ -627,8 +628,94 @@ fn run(cli: Cli) -> Result<()> {
             let mut stdout = std::io::stdout().lock();
             man.render(&mut stdout).map_err(Error::Io)?;
         }
+
+        Command::Append {
+            archive,
+            input,
+            format,
+            level,
+            exclude,
+            exclude_from,
+            follow_symlinks,
+        } => {
+            run_append(
+                cli.progress, cli.verbose, archive, input, format, level, exclude,
+                exclude_from, follow_symlinks, AppendMode::Append,
+            )?;
+        }
+
+        Command::Update {
+            archive,
+            input,
+            format,
+            level,
+            exclude,
+            exclude_from,
+            follow_symlinks,
+        } => {
+            run_append(
+                cli.progress, cli.verbose, archive, input, format, level, exclude,
+                exclude_from, follow_symlinks, AppendMode::Update,
+            )?;
+        }
+
+        Command::Remove {
+            archive,
+            patterns,
+            format,
+            level,
+        } => {
+            let fmt = resolve_input_format(format, &archive)?;
+            modify::remove(&archive, fmt, &patterns, level)?;
+        }
     }
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_append(
+    show_progress: bool,
+    verbose: bool,
+    archive: camino::Utf8PathBuf,
+    input: Vec<camino::Utf8PathBuf>,
+    format: Option<Format>,
+    level: Option<u32>,
+    exclude: Vec<String>,
+    exclude_from: Vec<camino::Utf8PathBuf>,
+    follow_symlinks: bool,
+    mode: AppendMode,
+) -> Result<()> {
+    let fmt = resolve_input_format(format, &archive)?;
+    let excludes = filter::build_excludes(exclude, &exclude_from)?;
+    let base_progress: Box<dyn ProgressReport> = if show_progress {
+        Box::new(BarProgress::spinner())
+    } else {
+        Box::new(NoProgress)
+    };
+    let verbose_progress;
+    let progress: &dyn ProgressReport = if verbose {
+        verbose_progress = VerboseReport::new(&*base_progress);
+        &verbose_progress
+    } else {
+        &*base_progress
+    };
+    let opts = CompressOpts {
+        level,
+        excludes,
+        follow_symlinks,
+        exclude_vcs_ignores: false,
+        no_recursion: false,
+        progress,
+        fixed_mtime: None,
+        fixed_uid: None,
+        fixed_gid: None,
+        fixed_mode: None,
+        newer_than: None,
+        older_than: None,
+    };
+    modify::append(&archive, fmt, &input, mode, &opts)?;
+    progress.finish();
     Ok(())
 }
 

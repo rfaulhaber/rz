@@ -276,6 +276,98 @@ pub enum Command {
 
     /// Generate a man page
     Man,
+
+    /// Append files to an existing archive (tar -r, zip -u)
+    ///
+    /// Uncompressed tar and zip support in-place append (fast).  Compressed
+    /// tar formats (tar.gz, tar.zst, tar.xz, tar.bz2) are rewritten to a new
+    /// file under the same path, since their compression layer cannot be
+    /// patched in place.  7z is not supported.
+    #[command(alias = "r")]
+    Append {
+        /// Existing archive
+        archive: Utf8PathBuf,
+
+        /// Files or directories to add
+        #[arg(required = true)]
+        input: Vec<Utf8PathBuf>,
+
+        /// Format (inferred from archive extension if omitted)
+        #[arg(short, long)]
+        format: Option<Format>,
+
+        /// Compression level for the rewritten compressed-tar archive
+        #[arg(short, long)]
+        level: Option<u32>,
+
+        /// Exclude files matching a glob pattern (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
+
+        /// Read exclude patterns from a file (one per line)
+        #[arg(long)]
+        exclude_from: Vec<Utf8PathBuf>,
+
+        /// Follow symlinks (archive target content instead of the link)
+        #[arg(short = 'H', long)]
+        follow_symlinks: bool,
+    },
+
+    /// Append files only if newer than the matching entry in the archive
+    /// (tar -u, zip -u).  Same format support and rewrite semantics as
+    /// `append`.
+    #[command(alias = "u")]
+    Update {
+        /// Existing archive
+        archive: Utf8PathBuf,
+
+        /// Files or directories to add (only entries newer than the archive
+        /// copy are written)
+        #[arg(required = true)]
+        input: Vec<Utf8PathBuf>,
+
+        /// Format (inferred from archive extension if omitted)
+        #[arg(short, long)]
+        format: Option<Format>,
+
+        /// Compression level for the rewritten compressed-tar archive
+        #[arg(short, long)]
+        level: Option<u32>,
+
+        /// Exclude files matching a glob pattern (repeatable)
+        #[arg(long)]
+        exclude: Vec<String>,
+
+        /// Read exclude patterns from a file (one per line)
+        #[arg(long)]
+        exclude_from: Vec<Utf8PathBuf>,
+
+        /// Follow symlinks (archive target content instead of the link)
+        #[arg(short = 'H', long)]
+        follow_symlinks: bool,
+    },
+
+    /// Remove entries from an archive (tar --delete, zip -d)
+    ///
+    /// Always implemented as a read-then-rewrite into a new file under the
+    /// same path.  7z is not supported.
+    #[command(alias = "rm")]
+    Remove {
+        /// Existing archive
+        archive: Utf8PathBuf,
+
+        /// Glob patterns of entries to remove
+        #[arg(required = true)]
+        patterns: Vec<String>,
+
+        /// Format (inferred from archive extension if omitted)
+        #[arg(short, long)]
+        format: Option<Format>,
+
+        /// Compression level for the rewritten compressed-tar archive
+        #[arg(short, long)]
+        level: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
