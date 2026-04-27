@@ -179,7 +179,17 @@ const FORMATS: &[FormatDesc] = &[
 // ── Entry-count parameter sets ──────────────────────────────────────────────
 
 /// (label, num_files, file_size_bytes)
-const SIZES: &[(&str, usize, usize)] = &[("10x4KB", 10, 4096), ("500x4KB", 500, 4096)];
+///
+/// `10x4KB` and `500x4KB` vary entry count at fixed payload to expose per-entry
+/// overhead. `1x1MB` flips this — a single large file isolates codec throughput
+/// from archive bookkeeping. 1 MB (not 10 MB) keeps the slowest format (7z
+/// compress at ~480 MB/s) under ~500 ms/iter so criterion can still draw a
+/// reasonable sample.
+const SIZES: &[(&str, usize, usize)] = &[
+    ("10x4KB", 10, 4096),
+    ("500x4KB", 500, 4096),
+    ("1x1MB", 1, 1_048_576),
+];
 
 // ── Benchmarks ──────────────────────────────────────────────────────────────
 
