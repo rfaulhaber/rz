@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "rz-archive"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bzip2",
  "camino",
