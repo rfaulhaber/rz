@@ -11,7 +11,7 @@ more remembering whether it's `tar xzf`, `unzip`, or `7z x`.
 | tar       | `.tar`                | none             | `tar`             |
 | tar+gzip  | `.tar.gz`, `.tgz`     | gzip             | `flate2`          |
 | tar+zstd  | `.tar.zst`, `.tzst`   | Zstandard        | `ruzstd`          |
-| tar+xz    | `.tar.xz`, `.txz`     | LZMA2            | `lzma-rs` / `xz2` |
+| tar+xz    | `.tar.xz`, `.txz`     | LZMA2            | `lzma-rust2` / `xz2` |
 | tar+bzip2 | `.tar.bz2`, `.tbz2`   | bzip2            | `bzip2` (opt-in)  |
 | zip       | `.zip`                | Deflate          | `zip`             |
 | 7z        | `.7z`                 | LZMA2            | `sevenz-rust2`    |
@@ -227,20 +227,20 @@ rz info mydir.tar.gz --human-readable
 
 | Feature  | Effect                                             |
 |----------|----------------------------------------------------|
-| `xz2`   | Use C-backed liblzma for xz (streaming, faster)    |
+| `xz2`   | Use C-backed liblzma for xz (typically faster)     |
 | `bzip2` | Enable tar.bz2 support via C-backed libbz2         |
 
-Without these features, xz uses the pure-Rust `lzma-rs` crate (buffers the
-archive in memory before compressing) and bzip2 is unavailable.
+Without these features, xz uses the pure-Rust `lzma-rust2` crate, which
+streams in both directions; bzip2 is unavailable.
 
 ## Known limitations
 
 - **tar.zst compression level**: The pure-Rust `ruzstd` encoder currently only
   supports a single compression level (`Fastest`, roughly zstd level 1).
   `--level 0` selects uncompressed framing; all other values use `Fastest`.
-- **tar.xz / tar.zst memory usage**: Without the `xz2` feature, xz and zstd
-  compression buffers the entire tar archive in memory before compressing.
-  For large archives, consider enabling the `xz2` feature for streaming xz.
+- **tar.zst memory usage**: The pure-Rust `ruzstd` encoder buffers the entire
+  tar archive in memory before compressing. For large archives this can use
+  significant RAM.
 - **7z format**: Does not support `--strip-components`. Extracts contents
   flat (does not preserve the top-level directory wrapper).
 - **Stdin/stdout streaming**: Only tar-based formats support `-` for

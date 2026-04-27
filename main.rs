@@ -762,7 +762,7 @@ fn print_formats(json: bool) -> Result<()> {
             backend: Some(if cfg!(feature = "xz2") {
                 "xz2 (C)".into()
             } else {
-                "lzma-rs".into()
+                "lzma-rust2".into()
             }),
             status: OutputStatus::Enabled,
         },

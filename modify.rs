@@ -365,16 +365,8 @@ fn xz_read(buf: BufReader<fs_err::File>) -> Result<Box<dyn Read>> {
 }
 
 #[cfg(not(feature = "xz2"))]
-fn xz_read(mut buf: BufReader<fs_err::File>) -> Result<Box<dyn Read>> {
-    // lzma-rs is a one-shot decoder; buffer the whole archive in memory.
-    // Same memory characteristic as the existing `tar_xz::decompress` path
-    // when the `xz2` feature is off.
-    let mut compressed = Vec::new();
-    buf.read_to_end(&mut compressed)?;
-    let mut decompressed = Vec::new();
-    lzma_rs::xz_decompress(&mut std::io::Cursor::new(&compressed), &mut decompressed)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(Box::new(std::io::Cursor::new(decompressed)))
+fn xz_read(buf: BufReader<fs_err::File>) -> Result<Box<dyn Read>> {
+    Ok(Box::new(lzma_rust2::XzReader::new(buf, true)))
 }
 
 /// Wrap a `Write` in the appropriate compression encoder for `fmt`.
@@ -411,8 +403,8 @@ fn xz_writer(writer: BufWriter<fs_err::File>, level: u32) -> Result<Box<dyn Enco
 }
 
 #[cfg(not(feature = "xz2"))]
-fn xz_writer(writer: BufWriter<fs_err::File>, _level: u32) -> Result<Box<dyn EncoderHandle>> {
-    Ok(Box::new(LzmaRsXzHandle::new(writer)))
+fn xz_writer(writer: BufWriter<fs_err::File>, level: u32) -> Result<Box<dyn EncoderHandle>> {
+    Ok(Box::new(LzmaRust2XzHandle::new(writer, level)?))
 }
 
 /// Trait for opaque encoder pipelines used by `tar_compressed_append`.  Each
@@ -625,27 +617,22 @@ impl EncoderHandle for XzHandle {
 }
 
 #[cfg(not(feature = "xz2"))]
-struct LzmaRsXzHandle {
-    tar_buf: Vec<u8>,
-    builder: Option<tar::Builder<Vec<u8>>>,
-    out: Option<BufWriter<fs_err::File>>,
+struct LzmaRust2XzHandle {
+    builder: Option<tar::Builder<lzma_rust2::XzWriter<BufWriter<fs_err::File>>>>,
 }
 
 #[cfg(not(feature = "xz2"))]
-impl LzmaRsXzHandle {
-    fn new(out: BufWriter<fs_err::File>) -> Self {
-        let mut s = Self {
-            tar_buf: Vec::new(),
-            builder: None,
-            out: Some(out),
-        };
-        s.builder = Some(tar::Builder::new(std::mem::take(&mut s.tar_buf)));
-        s
+impl LzmaRust2XzHandle {
+    fn new(writer: BufWriter<fs_err::File>, level: u32) -> Result<Self> {
+        let enc = lzma_rust2::XzWriter::new(writer, lzma_rust2::XzOptions::with_preset(level))?;
+        Ok(Self {
+            builder: Some(tar::Builder::new(enc)),
+        })
     }
 }
 
 #[cfg(not(feature = "xz2"))]
-impl EncoderHandle for LzmaRsXzHandle {
+impl EncoderHandle for LzmaRust2XzHandle {
     fn copy_existing(
         &mut self,
         reader: &mut dyn Read,
@@ -666,10 +653,9 @@ impl EncoderHandle for LzmaRsXzHandle {
     }
     fn finish(mut self: Box<Self>) -> Result<()> {
         let b = self.builder.take().ok_or_else(builder_taken_err)?;
-        let tar_data = b.into_inner()?;
-        let mut out = self.out.take().ok_or_else(builder_taken_err)?;
-        lzma_rs::xz_compress(&mut std::io::Cursor::new(tar_data), &mut out)?;
-        let file = out.into_inner().map_err(std::io::Error::other)?;
+        let enc = b.into_inner()?;
+        let buf = enc.finish()?;
+        let file = buf.into_inner().map_err(std::io::Error::other)?;
         file.sync_all()?;
         Ok(())
     }

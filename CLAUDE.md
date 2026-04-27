@@ -60,7 +60,7 @@ Pure Rust implementations preferred. C-binding crates are behind optional featur
 - `xz2` feature → `xz2` crate (C bindings to liblzma)
 - `bzip2` feature → `bzip2` crate (C bindings to libbz2)
 
-Default (pure Rust): `flate2` (gzip), `ruzstd` (zstd), `lzma-rs` (xz)
+Default (pure Rust): `flate2` (gzip), `ruzstd` (zstd), `lzma-rust2` (xz)
 Archive crates: `tar`, `zip`, `sevenz-rust2`
 
 ## Environment
