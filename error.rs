@@ -57,6 +57,9 @@ pub enum Error {
     #[error("cannot infer format from stdin; specify --format")]
     CannotInferFormatStdin,
 
+    #[error("--one-top-level needs a filename to derive the directory from; not supported with stdin input")]
+    OneTopLevelStdin,
+
     #[error("path traversal detected in archive entry: {0}")]
     PathTraversal(String),
 

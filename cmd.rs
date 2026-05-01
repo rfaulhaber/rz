@@ -126,6 +126,11 @@ pub enum Command {
         #[arg(short, long)]
         output: Option<Utf8PathBuf>,
 
+        /// Extract into a sub-directory derived from the archive name
+        /// (e.g. `foo.tar.gz` extracts into `foo/`).  Created automatically.
+        #[arg(short = 't', long, conflicts_with_all = ["output", "to_stdout", "no_directory"])]
+        one_top_level: bool,
+
         /// Format (inferred from extension/magic bytes if omitted)
         #[arg(short, long)]
         format: Option<Format>,

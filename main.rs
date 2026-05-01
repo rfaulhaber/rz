@@ -277,6 +277,7 @@ fn run(cli: Cli) -> Result<()> {
             totals,
             dry_run,
             paths,
+            one_top_level,
         } => {
             let from_stdin = is_stdio(input.as_str());
 
@@ -289,6 +290,23 @@ fn run(cli: Cli) -> Result<()> {
             if from_stdin && requires_seek(&fmt) {
                 return Err(Error::StdinNotSupported(fmt.to_string()));
             }
+
+            // `--one-top-level` derives a sub-directory from the archive
+            // filename (`foo.tar.gz` → `foo/`).  Stdin has no filename, so
+            // we can't derive anything — bail with a clear error rather
+            // than silently treating "-" as the stem.  Tar-family extraction
+            // expects its output directory to already exist, so we create
+            // it ourselves here.
+            let output = if one_top_level {
+                if from_stdin {
+                    return Err(Error::OneTopLevelStdin);
+                }
+                let derived = fmt.derive_output_dir(&input);
+                fs_err::create_dir_all(&derived)?;
+                Some(derived)
+            } else {
+                output
+            };
 
             let excludes = filter::build_excludes(exclude, &exclude_from)?;
             let includes = {

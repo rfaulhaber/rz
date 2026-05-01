@@ -90,6 +90,53 @@ impl Format {
         }
     }
 
+    /// Every recognized extension for this format, longest-first so suffix
+    /// stripping prefers `.tar.gz` over `.gz`.  The list mirrors the matches
+    /// in `from_path` so a path that resolved to this format here is
+    /// guaranteed to strip cleanly.
+    fn recognized_extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Zip => &[".zip"],
+            Self::Tar => &[".tar"],
+            Self::TarGz => &[".tar.gz", ".tgz"],
+            Self::TarZst => &[".tar.zst", ".tzst"],
+            Self::TarXz => &[".tar.xz", ".txz"],
+            Self::TarBz2 => &[".tar.bz2", ".tbz2"],
+            Self::SevenZ => &[".7z"],
+        }
+    }
+
+    /// Derive a directory name from an archive path by stripping its format
+    /// extension (the inverse of `default_output`).  Used by `--one-top-level`
+    /// on `decompress` so `foo.tar.gz` extracts into `foo/`.
+    ///
+    /// Falls back to `archive` for paths without a usable file name (`/`,
+    /// `.`, `..`, empty) or filenames that are themselves just an extension
+    /// (`.tar.gz` → no stem).  When the filename has no recognized suffix —
+    /// possible if the user forced a format with `--format` — we keep the
+    /// filename unchanged rather than guess.
+    pub fn derive_output_dir(&self, input: &Utf8Path) -> Utf8PathBuf {
+        let name = input.file_name().unwrap_or("");
+        for ext in self.recognized_extensions() {
+            if ends_with_ci(name, ext) {
+                let stem = &name[..name.len() - ext.len()];
+                return if stem.is_empty() {
+                    // Filename was just an extension (e.g. ".tar.gz") — no
+                    // usable stem.  Since the list is longest-first, no
+                    // shorter alias could give a longer stem, so bail now.
+                    Utf8PathBuf::from("archive")
+                } else {
+                    Utf8PathBuf::from(stem)
+                };
+            }
+        }
+        if name.is_empty() {
+            Utf8PathBuf::from("archive")
+        } else {
+            Utf8PathBuf::from(name)
+        }
+    }
+
     /// Derive a default output path from the first input and the format's extension.
     ///
     /// Degenerate inputs (`/`, `.`, `..`, empty, paths ending in `..`) have no
@@ -319,6 +366,85 @@ mod tests {
         // "foo/" — the file name component is "foo".
         let out = Format::TarBz2.default_output(Utf8Path::new("foo/"));
         assert_eq!(out, Utf8PathBuf::from("foo.tar.bz2"));
+    }
+
+    // ── derive_output_dir ────────────────────────────────────────────────
+
+    #[test]
+    fn derive_output_dir_strips_canonical_extension() {
+        let out = Format::TarGz.derive_output_dir(Utf8Path::new("foo.tar.gz"));
+        assert_eq!(out, Utf8PathBuf::from("foo"));
+    }
+
+    #[test]
+    fn derive_output_dir_strips_short_alias() {
+        // `.tgz` is recognized as TarGz by from_path; the same alias must be
+        // strippable when the format was inferred from it.
+        let out = Format::TarGz.derive_output_dir(Utf8Path::new("foo.tgz"));
+        assert_eq!(out, Utf8PathBuf::from("foo"));
+    }
+
+    #[test]
+    fn derive_output_dir_strips_directory_prefix() {
+        let out = Format::Zip.derive_output_dir(Utf8Path::new("/some/dir/bundle.zip"));
+        assert_eq!(out, Utf8PathBuf::from("bundle"));
+    }
+
+    #[test]
+    fn derive_output_dir_is_case_insensitive() {
+        let out = Format::TarGz.derive_output_dir(Utf8Path::new("Foo.TAR.GZ"));
+        assert_eq!(out, Utf8PathBuf::from("Foo"));
+    }
+
+    #[test]
+    fn derive_output_dir_extension_only_falls_back_to_archive() {
+        // Filename is purely the extension — no stem to keep.
+        let out = Format::TarGz.derive_output_dir(Utf8Path::new(".tar.gz"));
+        assert_eq!(out, Utf8PathBuf::from("archive"));
+    }
+
+    #[test]
+    fn derive_output_dir_root_falls_back_to_archive() {
+        let out = Format::TarGz.derive_output_dir(Utf8Path::new("/"));
+        assert_eq!(out, Utf8PathBuf::from("archive"));
+    }
+
+    #[test]
+    fn derive_output_dir_keeps_filename_when_format_was_forced() {
+        // User passed `--format zip` for a file with no recognized extension;
+        // we don't have a stem to guess at, so use the filename verbatim.
+        let out = Format::Zip.derive_output_dir(Utf8Path::new("mystery"));
+        assert_eq!(out, Utf8PathBuf::from("mystery"));
+    }
+
+    #[test]
+    fn derive_output_dir_seven_z() {
+        let out = Format::SevenZ.derive_output_dir(Utf8Path::new("backup.7z"));
+        assert_eq!(out, Utf8PathBuf::from("backup"));
+    }
+
+    #[test]
+    fn derive_output_dir_round_trips_with_default_output() {
+        // `derive_output_dir` and `default_output` should be inverses for any
+        // archive name we generated ourselves.
+        let formats = [
+            Format::Zip,
+            Format::Tar,
+            Format::TarGz,
+            Format::TarZst,
+            Format::TarXz,
+            Format::TarBz2,
+            Format::SevenZ,
+        ];
+        for fmt in &formats {
+            let archive = fmt.default_output(Utf8Path::new("payload"));
+            let derived = fmt.derive_output_dir(&archive);
+            assert_eq!(
+                derived,
+                Utf8PathBuf::from("payload"),
+                "round-trip failed for {fmt}",
+            );
+        }
     }
 
     // ── resolve_compress_format ──────────────────────────────────────────
