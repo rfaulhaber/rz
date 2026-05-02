@@ -372,6 +372,36 @@ pub enum Command {
         follow_symlinks: bool,
     },
 
+    /// Convert an archive from one format to another
+    ///
+    /// Extracts to a temporary directory and re-compresses in the target
+    /// format.  All format combinations are supported (tar-family ↔ zip ↔ 7z).
+    #[command(alias = "cv")]
+    Convert {
+        /// Input archive
+        input: Utf8PathBuf,
+
+        /// Output archive path (extension used to infer format when --to is omitted)
+        #[arg(short, long)]
+        output: Option<Utf8PathBuf>,
+
+        /// Input format (inferred from extension/magic bytes if omitted)
+        #[arg(long)]
+        from: Option<Format>,
+
+        /// Output format (inferred from --output extension if omitted)
+        #[arg(long)]
+        to: Option<Format>,
+
+        /// Compression level for the output archive
+        #[arg(short, long)]
+        level: Option<u32>,
+
+        /// Overwrite existing output file
+        #[arg(short = 'F', long)]
+        force: bool,
+    },
+
     /// Remove entries from an archive (tar --delete, zip -d)
     ///
     /// Always implemented as a read-then-rewrite into a new file under the

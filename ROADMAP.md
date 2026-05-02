@@ -48,11 +48,13 @@ established archive tools (`tar`, `bsdtar`, `zip`/`unzip`, `7z`, `pigz`,
 
 ## Tier 2 — ergonomic and scripting wins
 
-7. **Archive conversion / repack** — `rz convert a.tar.gz -o a.tar.zst`
-   Today the same effect requires `rz d | rz c` through stdin/stdout. A
-   dedicated subcommand can skip redundant CRC verification and, for pure
-   compression-layer swaps (`.gz` → `.zst`), stream entries through without
-   decoding to tar level.
+7. ~~**Archive conversion / repack**~~ — **DONE.** `rz convert a.tar.gz -o a.tar.zst`
+   Implemented via extract-to-tempdir + re-compress path, which handles all
+   format combinations (tar-family ↔ zip ↔ 7z).  Supports `--to <FORMAT>`
+   to derive the output path from the input stem, `--level`, and `-F/--force`.
+   Integration coverage in `tests/convert.rs`.
+   The entry-stream optimization for pure compression-layer swaps (`.gz` →
+   `.zst` without decoding to tar level) is deferred as a future enhancement.
 
 9. ~~**Shell completions + man pages**~~ — **DONE.** `rz completions <shell>`
    and `rz man` emit clap-generated output. Packaging them into `nix build`

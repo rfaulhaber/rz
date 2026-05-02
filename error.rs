@@ -90,4 +90,10 @@ pub enum Error {
          refusing to write an empty archive"
     )]
     NoReadableInputs,
+
+    #[error("convert: input and output resolve to the same path: {0}")]
+    ConvertSamePath(Utf8PathBuf),
+
+    #[error("convert: cannot infer output format; specify --to or --output with an extension")]
+    ConvertCannotInferOutputFormat,
 }

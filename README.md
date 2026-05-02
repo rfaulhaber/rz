@@ -171,6 +171,29 @@ rz decompress project.tar.gz --rename src/=lib/ --prefix v2
 rz d mydir.tar.gz
 ```
 
+### Convert
+
+```sh
+# Convert to a different format (output path explicit)
+rz convert archive.tar.gz -o archive.tar.zst
+
+# Derive output path from input stem + --to format
+# (foo.tar.gz + --to tar-zst → foo.tar.zst alongside the input)
+rz convert foo.tar.gz --to tar-zst
+
+# Cross-family conversion (zip ↔ tar, zip ↔ 7z, etc.)
+rz convert archive.zip -o archive.tar.xz
+
+# Override the compression level of the output archive
+rz convert archive.tar.gz --to tar-zst --level 19
+
+# Overwrite existing output
+rz convert archive.tar.gz -o archive.tar.zst -F
+
+# Short alias
+rz cv archive.tar.gz --to tar-zst
+```
+
 ### List
 
 ```sh

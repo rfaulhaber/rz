@@ -94,7 +94,7 @@ impl Format {
     /// stripping prefers `.tar.gz` over `.gz`.  The list mirrors the matches
     /// in `from_path` so a path that resolved to this format here is
     /// guaranteed to strip cleanly.
-    fn recognized_extensions(&self) -> &'static [&'static str] {
+    pub fn recognized_extensions(&self) -> &'static [&'static str] {
         match self {
             Self::Zip => &[".zip"],
             Self::Tar => &[".tar"],

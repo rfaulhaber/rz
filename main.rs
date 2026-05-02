@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::{CommandFactory, Parser};
 
 use rz::cmd::{Cli, Command, Format, SortField};
@@ -700,6 +701,17 @@ fn run(cli: Cli) -> Result<()> {
             let fmt = resolve_input_format(format, &archive)?;
             modify::remove(&archive, fmt, &patterns, level)?;
         }
+
+        Command::Convert {
+            input,
+            output,
+            from,
+            to,
+            level,
+            force,
+        } => {
+            run_convert(input, output, from, to, level, force)?;
+        }
     }
 
     Ok(())
@@ -749,6 +761,161 @@ fn run_append(
     };
     modify::append(&archive, fmt, &input, mode, &opts)?;
     progress.finish();
+    Ok(())
+}
+
+/// Resolve the output format for `rz convert`.
+///
+/// Priority: explicit `--to` → extension of `--output` → error.
+fn resolve_convert_output_format(
+    to_format: Option<Format>,
+    output: Option<&Utf8Path>,
+) -> Result<Format> {
+    if let Some(f) = to_format {
+        return Ok(f);
+    }
+    if let Some(out) = output {
+        if let Some(f) = Format::from_path(out) {
+            return Ok(f);
+        }
+        return Err(Error::CannotInferFormat(out.to_owned()));
+    }
+    Err(Error::ConvertCannotInferOutputFormat)
+}
+
+/// Derive the output path when `--output` was omitted but `--to` was given.
+///
+/// Strips the input's extension(s) for `fmt_in` and appends `fmt_out`'s
+/// canonical extension.  The directory component of `input` is preserved so
+/// the output lands alongside the input.
+///
+/// Example: `/path/foo.tar.gz` + `--to tar-zst` → `/path/foo.tar.zst`
+fn derive_convert_output(input: &Utf8Path, fmt_out: Format, fmt_in: Format) -> Utf8PathBuf {
+    // We need to work on the file name, then re-join with the parent.
+    let name = input.file_name().unwrap_or("archive");
+    let stem = {
+        let mut s = name;
+        for ext in fmt_in.recognized_extensions() {
+            if s.len() >= ext.len()
+                && s[s.len() - ext.len()..].eq_ignore_ascii_case(ext)
+            {
+                s = &s[..s.len() - ext.len()];
+                break;
+            }
+        }
+        if s.is_empty() { "archive" } else { s }
+    };
+    let new_name = format!("{stem}{}", fmt_out.extension());
+    match input.parent() {
+        Some(parent) if !parent.as_str().is_empty() => parent.join(new_name),
+        _ => Utf8PathBuf::from(new_name),
+    }
+}
+
+/// Return `true` when two paths refer to the same filesystem object.
+///
+/// Canonicalization is attempted on both sides; if either fails (e.g. the
+/// output doesn't exist yet) the raw `Utf8Path` strings are compared instead.
+fn paths_canonically_equal(a: &Utf8Path, b: &Utf8Path) -> bool {
+    let canon_a = a.canonicalize().ok();
+    let canon_b = b.canonicalize().ok();
+    match (canon_a, canon_b) {
+        (Some(ca), Some(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
+/// Dispatch decompress to the correct format module.
+fn dispatch_decompress(
+    fmt: Format,
+    input: &Utf8Path,
+    output_dir: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
+    match fmt {
+        Format::Zip => zip::decompress(input, output_dir, opts)?,
+        Format::Tar => tar::decompress(input, output_dir, opts)?,
+        Format::TarGz => tar_gz::decompress(input, output_dir, opts)?,
+        Format::TarZst => tar_zst::decompress(input, output_dir, opts)?,
+        Format::TarXz => tar_xz::decompress(input, output_dir, opts)?,
+        #[cfg(feature = "bzip2")]
+        Format::TarBz2 => tar_bz2::decompress(input, output_dir, opts)?,
+        Format::SevenZ => seven_z::decompress(input, output_dir, opts)?,
+        #[allow(unreachable_patterns)]
+        other => return Err(Error::UnsupportedFormat(other.to_string())),
+    }
+    Ok(())
+}
+
+/// Dispatch compress to the correct format module.
+fn dispatch_compress(
+    fmt: Format,
+    inputs: &[Utf8PathBuf],
+    output: &Utf8Path,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    match fmt {
+        Format::Zip => zip::compress(inputs, output, opts)?,
+        Format::Tar => tar::compress(inputs, output, opts)?,
+        Format::TarGz => tar_gz::compress(inputs, output, opts)?,
+        Format::TarZst => tar_zst::compress(inputs, output, opts)?,
+        Format::TarXz => tar_xz::compress(inputs, output, opts)?,
+        #[cfg(feature = "bzip2")]
+        Format::TarBz2 => tar_bz2::compress(inputs, output, opts)?,
+        Format::SevenZ => seven_z::compress(inputs, output, opts)?,
+        #[allow(unreachable_patterns)]
+        other => return Err(Error::UnsupportedFormat(other.to_string())),
+    }
+    Ok(())
+}
+
+fn run_convert(
+    input: Utf8PathBuf,
+    output: Option<Utf8PathBuf>,
+    from_format: Option<Format>,
+    to_format: Option<Format>,
+    level: Option<u32>,
+    force: bool,
+) -> Result<()> {
+    let fmt_in = resolve_input_format(from_format, &input)?;
+    let fmt_out = resolve_convert_output_format(to_format, output.as_deref())?;
+
+    let output_path = match output {
+        Some(p) => p,
+        None => derive_convert_output(&input, fmt_out, fmt_in),
+    };
+
+    if !force && fs_err::metadata(&output_path).is_ok() {
+        return Err(Error::FileExists(output_path));
+    }
+
+    if paths_canonically_equal(&input, &output_path) {
+        return Err(Error::ConvertSamePath(output_path));
+    }
+
+    // Extract input into a temporary directory, then re-compress from there.
+    let tmp = tempfile::tempdir()?;
+    let tmp_dir = Utf8Path::from_path(tmp.path())
+        .ok_or_else(|| Error::InvalidUtf8Path(tmp.path().display().to_string()))?
+        .to_owned();
+
+    let dec_opts = DecompressOpts::new(true, 0, globset::GlobSet::empty(), globset::GlobSet::empty());
+    dispatch_decompress(fmt_in, &input, &tmp_dir, &dec_opts)?;
+
+    // Compress from the children of tmp_dir so the archive entries are named
+    // after the original archive's top-level entries, not the tempdir itself.
+    let mut children: Vec<Utf8PathBuf> = Vec::new();
+    for entry in fs_err::read_dir(&tmp_dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        let utf8 = Utf8PathBuf::try_from(p)
+            .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+        children.push(utf8);
+    }
+
+    let comp_opts = CompressOpts::new(level, globset::GlobSet::empty());
+    dispatch_compress(fmt_out, &children, &output_path, &comp_opts)?;
+
     Ok(())
 }
 
