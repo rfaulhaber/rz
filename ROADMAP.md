@@ -67,8 +67,12 @@ established archive tools (`tar`, `bsdtar`, `zip`/`unzip`, `7z`, `pigz`,
     header. Zip and 7z reject the flags up-front because their entries lack
     reliable per-entry mtime through `zip` / `sevenz-rust2`.
 
-11. **Transform / rename rules** — `--transform 's/foo/bar/'` on extract
-    Simpler variants: `--rename OLD=NEW`, `--prefix PATH`.
+11. **Transform / rename rules** — ~~`--rename OLD=NEW`~~ and ~~`--prefix PATH`~~
+    **DONE (partial).** `--rename OLD=NEW` (repeatable) and `--prefix PATH` are
+    implemented and wired into tar-family, zip, and 7z extraction paths.
+    Path safety is re-validated after rewriting so hostile rules can't inject
+    `..` or absolute paths.  `--transform 's/foo/bar/'` (sed-style regex) is
+    deferred — higher complexity, not yet implemented.
 
 ## Tier 3 — niche but notable
 

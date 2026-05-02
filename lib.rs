@@ -81,6 +81,11 @@ pub struct DecompressOpts<'a> {
     pub newer_than: Option<i64>,
     /// Extract only entries with mtime strictly less than this (unix seconds).
     pub older_than: Option<i64>,
+    /// Substring rename rules applied to each entry path after strip_components.
+    /// Each `(old, new)` is applied in order; all occurrences of `old` are replaced.
+    pub renames: Vec<(String, String)>,
+    /// Prefix prepended to every entry path after renames.
+    pub prefix: Option<Utf8PathBuf>,
     pub progress: &'a dyn ProgressReport,
 }
 
@@ -126,6 +131,8 @@ impl DecompressOpts<'_> {
             same_owner: false,
             newer_than: None,
             older_than: None,
+            renames: Vec::new(),
+            prefix: None,
             progress: &NoProgress,
         }
     }

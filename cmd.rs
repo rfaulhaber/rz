@@ -1,4 +1,4 @@
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
@@ -214,6 +214,15 @@ pub enum Command {
         /// Show what would be extracted without writing to disk
         #[arg(short = 'n', long)]
         dry_run: bool,
+
+        /// Substring rewrite on extracted paths: --rename OLD=NEW (repeatable).
+        /// Replaces all occurrences of OLD with NEW in each entry path.
+        #[arg(long, value_name = "OLD=NEW", value_parser = parse_rename)]
+        rename: Vec<(String, String)>,
+
+        /// Prepend a path prefix to every extracted entry
+        #[arg(long, value_name = "PATH")]
+        prefix: Option<Utf8PathBuf>,
 
         /// Extract only these specific paths from the archive
         paths: Vec<String>,
@@ -455,6 +464,33 @@ fn parse_octal_mode(s: &str) -> std::result::Result<u32, String> {
         ));
     }
     Ok(mode)
+}
+
+/// Parse a `--rename OLD=NEW` argument into a `(old, new)` pair.
+/// Rejects empty OLD strings.
+pub fn parse_rename(s: &str) -> std::result::Result<(String, String), String> {
+    let (old, new) = s
+        .split_once('=')
+        .ok_or_else(|| format!("invalid --rename `{s}` (expected OLD=NEW)"))?;
+    if old.is_empty() {
+        return Err(format!("--rename `{s}`: OLD must not be empty"));
+    }
+    Ok((old.to_owned(), new.to_owned()))
+}
+
+/// Validate that a prefix does not escape the extraction root.
+/// Called at CLI parse time so the error appears before any I/O.
+pub fn parse_prefix(s: &str) -> std::result::Result<Utf8PathBuf, String> {
+    // Reuse the same safety check as safe_entry_path (no `..`, no absolute).
+    for component in Utf8Path::new(s).components() {
+        if matches!(component, camino::Utf8Component::ParentDir) {
+            return Err(format!("--prefix `{s}` contains `..` components"));
+        }
+    }
+    if Utf8Path::new(s).is_absolute() {
+        return Err(format!("--prefix `{s}` must be a relative path"));
+    }
+    Ok(Utf8PathBuf::from(s))
 }
 
 #[cfg(test)]

@@ -286,6 +286,8 @@ fn run(cli: Cli) -> Result<()> {
             older_than,
             totals,
             dry_run,
+            rename,
+            prefix,
             paths,
             one_top_level,
         } => {
@@ -418,6 +420,8 @@ fn run(cli: Cli) -> Result<()> {
                 same_owner,
                 newer_than,
                 older_than,
+                renames: rename,
+                prefix,
                 progress,
             };
 

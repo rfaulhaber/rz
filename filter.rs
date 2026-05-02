@@ -80,6 +80,39 @@ pub fn strip_components(path: &Utf8Path, n: u32) -> Option<Utf8PathBuf> {
     }
 }
 
+// ── Path rewriting ─────────────────────────────────────────────────────────
+
+/// Apply user-supplied path rewrites: substring renames first (in order),
+/// then optional prefix.  Re-validates that the result has no `..` or
+/// absolute components so a hostile rule can't escape the output dir.
+///
+/// Returns an empty `Utf8PathBuf` when the entry should be skipped (i.e. a
+/// rename rule erased the entire path).  Callers should treat
+/// `result.as_str().is_empty()` as "skip this entry".
+pub fn apply_path_rewrites(
+    path: Utf8PathBuf,
+    renames: &[(String, String)],
+    prefix: Option<&Utf8Path>,
+) -> Result<Utf8PathBuf> {
+    let mut s = path.into_string();
+    for (old, new) in renames {
+        s = s.replace(old.as_str(), new.as_str());
+    }
+    if s.is_empty() {
+        // A rule renamed the whole path away — treat as "skip".
+        return Ok(Utf8PathBuf::new());
+    }
+    let combined = if let Some(p) = prefix {
+        let mut joined = p.to_owned();
+        joined.push(&s);
+        joined
+    } else {
+        Utf8PathBuf::from(s)
+    };
+    safe_entry_path(combined.as_str())?;
+    Ok(combined)
+}
+
 // ── VCS-aware walking ───────────────────────────────────────────────────────
 
 /// Build an `ignore::Walk` iterator that respects `.gitignore` rules.
@@ -405,16 +438,26 @@ pub fn extract_tar_to_writer<R: std::io::Read, W: std::io::Write>(
             None => continue,
         };
 
-        let display_name = if opts.no_directory {
+        let after_no_dir = if opts.no_directory {
             match stripped.file_name() {
-                Some(name) => name.to_owned(),
+                Some(name) => Utf8PathBuf::from(name),
                 None => continue,
             }
         } else {
-            stripped.to_string()
+            stripped
         };
 
-        opts.progress.set_entry(&display_name);
+        // Apply rename rules and optional prefix for consistent naming.
+        let display_path = match apply_path_rewrites(
+            after_no_dir,
+            &opts.renames,
+            opts.prefix.as_deref(),
+        )? {
+            p if p.as_str().is_empty() => continue,
+            p => p,
+        };
+
+        opts.progress.set_entry(display_path.as_str());
         let written = std::io::copy(&mut entry, writer)?;
         opts.progress.inc(written);
     }
@@ -709,6 +752,16 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             }
         } else {
             stripped
+        };
+
+        // Apply rename rules and optional prefix.
+        let dest_path = match apply_path_rewrites(
+            dest_path,
+            &opts.renames,
+            opts.prefix.as_deref(),
+        )? {
+            p if p.as_str().is_empty() => continue,
+            p => p,
         };
 
         let dest = output.join(&dest_path);

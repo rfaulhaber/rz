@@ -157,6 +157,16 @@ rz decompress mydir.tar.gz -n
 # Print total bytes processed at the end
 rz decompress mydir.tar.gz --totals
 
+# Rewrite entry paths: replace all occurrences of OLD with NEW (repeatable)
+rz decompress project.tar.gz --rename src/=lib/
+rz decompress project.tar.gz --rename src/=lib/ --rename tests/=spec/
+
+# Prepend a prefix to every extracted entry path
+rz decompress backup.tar.gz --prefix restore/2024
+
+# Combine rename and prefix
+rz decompress project.tar.gz --rename src/=lib/ --prefix v2
+
 # Short alias
 rz d mydir.tar.gz
 ```

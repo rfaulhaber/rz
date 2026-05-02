@@ -192,6 +192,16 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                 stripped
             };
 
+            // Apply rename rules and optional prefix.
+            let dest_path = match filter::apply_path_rewrites(
+                dest_path,
+                &opts.renames,
+                opts.prefix.as_deref(),
+            )? {
+                p if p.as_str().is_empty() => return Ok(()),
+                p => p,
+            };
+
             let out_path = output.join(&dest_path);
 
             if entry.is_dir() {
@@ -288,7 +298,17 @@ pub fn decompress_to_writer<W: std::io::Write>(
             continue;
         }
 
-        opts.progress.set_entry(stripped.as_str());
+        // Apply rename rules and optional prefix.
+        let display_path = match filter::apply_path_rewrites(
+            stripped,
+            &opts.renames,
+            opts.prefix.as_deref(),
+        )? {
+            p if p.as_str().is_empty() => continue,
+            p => p,
+        };
+
+        opts.progress.set_entry(display_path.as_str());
         io::copy(&mut entry, writer)?;
     }
     Ok(())

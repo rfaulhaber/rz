@@ -10,6 +10,8 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 fn can_fast_path(opts: &DecompressOpts<'_>) -> bool {
     // `keep_newer` and `strip_components` are rejected up-front in decompress,
     // so we don't need to check them here.
+    // Rename/prefix rules require per-entry path rewriting, so the fast path
+    // (single-call extraction) cannot be used when they are set.
     opts.force
         && opts.includes.is_empty()
         && opts.excludes.is_empty()
@@ -17,6 +19,8 @@ fn can_fast_path(opts: &DecompressOpts<'_>) -> bool {
         && !opts.no_directory
         && opts.backup_suffix.is_none()
         && !opts.preserve_permissions
+        && opts.renames.is_empty()
+        && opts.prefix.is_none()
 }
 
 // ── Compress ──────────────────────────────────────────────────────────────────
@@ -102,14 +106,30 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             if opts.no_directory && entry.is_directory {
                 return Ok(true);
             }
-            let out_name = if opts.no_directory {
+            let base_name = if opts.no_directory {
                 Utf8Path::new(&entry.name)
                     .file_name()
-                    .map(String::from)
-                    .unwrap_or_else(|| entry.name.clone())
+                    .map(camino::Utf8PathBuf::from)
+                    .unwrap_or_else(|| camino::Utf8PathBuf::from(&entry.name))
             } else {
-                entry.name.clone()
+                camino::Utf8PathBuf::from(&entry.name)
             };
+            // Apply rename rules and optional prefix.
+            let rewritten = crate::filter::apply_path_rewrites(
+                base_name,
+                &opts.renames,
+                opts.prefix.as_deref(),
+            )
+            .map_err(|e| {
+                sevenz_rust2::Error::Io(
+                    std::io::Error::other(e.to_string()),
+                    entry.name.clone().into(),
+                )
+            })?;
+            if rewritten.as_str().is_empty() {
+                return Ok(true);
+            }
+            let out_name = rewritten.into_string();
             let out_path = dest.join(&out_name);
             if !entry.is_directory && out_path.exists() {
                 if let Some(ref suffix) = opts.backup_suffix {
