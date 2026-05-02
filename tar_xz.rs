@@ -10,6 +10,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 #[cfg(feature = "xz2")]
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let level = opts.level.unwrap_or(6);
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
@@ -17,7 +18,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let encoder = builder.into_inner()?;
     let buf = encoder.finish()?;
@@ -28,6 +29,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
 
 #[cfg(not(feature = "xz2"))]
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let level = opts.level.unwrap_or(6);
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
@@ -35,7 +37,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let encoder = builder.into_inner()?;
     let buf = encoder.finish()?;
@@ -52,13 +54,14 @@ pub fn compress_to_writer<W: std::io::Write>(
     writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let level = opts.level.unwrap_or(6);
     let buf = BufWriter::new(writer);
     let encoder = xz2::write::XzEncoder::new(buf, level);
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let encoder = builder.into_inner()?;
     encoder.finish()?;
@@ -71,12 +74,13 @@ pub fn compress_to_writer<W: std::io::Write>(
     writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let level = opts.level.unwrap_or(6);
     let encoder = lzma_rust2::XzWriter::new(writer, lzma_rust2::XzOptions::with_preset(level))?;
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let encoder = builder.into_inner()?;
     encoder.finish()?;

@@ -22,8 +22,10 @@ fn can_fast_path(opts: &DecompressOpts<'_>) -> bool {
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
+    let inputs = crate::filter::validate_inputs(inputs, opts)?;
+
     let mut writer = sevenz_rust2::ArchiveWriter::create(output)?;
-    for input in inputs {
+    for input in &inputs {
         let meta = crate::filter::input_metadata(input, opts.follow_symlinks)?;
         if meta.is_dir() && opts.no_recursion {
             // Only add the directory entry, not its contents.

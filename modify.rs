@@ -220,6 +220,7 @@ fn filtered_opts<'a>(
         fixed_mode: opts.fixed_mode,
         newer_than: opts.newer_than,
         older_than: opts.older_than,
+        ignore_failed_read: opts.ignore_failed_read,
     }
 }
 

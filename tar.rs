@@ -9,12 +9,14 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
+
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
     let mut builder = tar::Builder::new(buf);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let buf = builder.into_inner()?;
     let file = buf.into_inner().map_err(std::io::Error::other)?;
@@ -30,11 +32,13 @@ pub fn compress_to_writer<W: std::io::Write>(
     writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
+
     let buf = std::io::BufWriter::new(writer);
     let mut builder = tar::Builder::new(buf);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     builder.into_inner()?;
     Ok(())

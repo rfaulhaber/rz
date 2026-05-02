@@ -58,6 +58,10 @@ pub struct CompressOpts<'a> {
     pub newer_than: Option<i64>,
     /// Include only entries with mtime strictly less than this (unix seconds).
     pub older_than: Option<i64>,
+    /// When `true`, top-level inputs that fail to stat are warned about and
+    /// skipped instead of aborting the whole archive.  An empty result still
+    /// errors out — we never produce an empty archive.
+    pub ignore_failed_read: bool,
 }
 
 /// Options for decompress operations.
@@ -96,6 +100,7 @@ impl CompressOpts<'_> {
             fixed_mode: None,
             newer_than: None,
             older_than: None,
+            ignore_failed_read: false,
         }
     }
 }

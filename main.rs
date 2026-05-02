@@ -118,6 +118,7 @@ fn run(cli: Cli) -> Result<()> {
             mode,
             newer_than,
             older_than,
+            ignore_failed_read,
         } => {
             let level = if store { Some(0) } else { level };
 
@@ -156,6 +157,7 @@ fn run(cli: Cli) -> Result<()> {
                     fixed_mode: mode,
                     newer_than,
                     older_than,
+                    ignore_failed_read,
                 };
                 let paths = filter::collect_compress_paths(&input, &dry_opts)?;
                 let mut stdout = std::io::stdout().lock();
@@ -213,6 +215,7 @@ fn run(cli: Cli) -> Result<()> {
                 fixed_mode: mode,
                 newer_than,
                 older_than,
+                ignore_failed_read,
             };
 
             if to_stdout {
@@ -731,6 +734,7 @@ fn run_append(
         fixed_mode: None,
         newer_than: None,
         older_than: None,
+        ignore_failed_read: false,
     };
     modify::append(&archive, fmt, &input, mode, &opts)?;
     progress.finish();

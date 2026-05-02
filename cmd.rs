@@ -114,6 +114,12 @@ pub enum Command {
         /// Include only entries with mtime strictly older than DATE (tar-family only)
         #[arg(long, value_name = "DATE", value_parser = parse_date)]
         older_than: Option<i64>,
+
+        /// Warn and skip inputs that fail to read instead of aborting
+        /// (matches GNU tar's `--ignore-failed-read`).  An empty result
+        /// after skipping still errors — we never write an empty archive.
+        #[arg(long)]
+        ignore_failed_read: bool,
     },
 
     /// Decompress an archive

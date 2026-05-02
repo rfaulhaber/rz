@@ -23,6 +23,7 @@ const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let level = opts.level.unwrap_or(6);
 
     // Buffer the tar archive in memory, then gzip-compress in parallel blocks.
@@ -30,7 +31,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     {
         let mut builder = tar::Builder::new(&mut tar_data);
         builder.follow_symlinks(opts.follow_symlinks);
-        filter::append_inputs(&mut builder, inputs, opts)?;
+        filter::append_inputs(&mut builder, &inputs, opts)?;
         builder.into_inner()?;
     }
 
@@ -50,13 +51,14 @@ pub fn compress_to_writer<W: std::io::Write>(
     mut writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let level = opts.level.unwrap_or(6);
 
     let mut tar_data = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut tar_data);
         builder.follow_symlinks(opts.follow_symlinks);
-        filter::append_inputs(&mut builder, inputs, opts)?;
+        filter::append_inputs(&mut builder, &inputs, opts)?;
         builder.into_inner()?;
     }
 

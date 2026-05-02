@@ -300,6 +300,73 @@ pub fn input_metadata(path: &Utf8Path, follow_symlinks: bool) -> Result<std::fs:
     }
 }
 
+/// Stat a top-level input path without `fs_err`'s wrapping.
+///
+/// `fs_err`'s default error message says "failed to query metadata of
+/// symlink ..." regardless of file type, which is confusing when the path
+/// is a regular file or directory.  For input validation we want a clean
+/// `io::Error` so we can produce a single error variant
+/// ([`Error::CannotReadInput`]) with predictable wording.
+#[allow(clippy::disallowed_methods)]
+fn stat_input_raw(path: &Utf8Path, follow_symlinks: bool) -> std::io::Result<std::fs::Metadata> {
+    if follow_symlinks {
+        std::fs::metadata(path)
+    } else {
+        std::fs::symlink_metadata(path)
+    }
+}
+
+// ── Input validation ────────────────────────────────────────────────────────
+
+/// Pre-validate top-level compress inputs *before* the output file is
+/// created.  This catches missing/unreadable paths up front, avoiding the
+/// "empty 22-byte zip left on disk after first error" footgun.
+///
+/// Behaviour:
+/// - Inputs whose `file_name()` matches an exclude pattern are silently
+///   dropped.
+/// - Inputs that fail to stat are either:
+///   - reported as [`Error::CannotReadInput`] (default), aborting the whole
+///     operation before the output file is touched, or
+///   - warned to stderr and skipped (when `opts.ignore_failed_read` is set).
+/// - If no inputs survive validation, returns [`Error::NoReadableInputs`]
+///   so we never write an empty archive.
+///
+/// Inner directory walks are not validated here — only the user-supplied
+/// top-level paths.  Per-entry failures during recursion still propagate
+/// as before.
+pub fn validate_inputs(
+    inputs: &[Utf8PathBuf],
+    opts: &CompressOpts<'_>,
+) -> Result<Vec<Utf8PathBuf>> {
+    use std::io::Write;
+
+    let mut valid = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let name = input.file_name().unwrap_or(input.as_str());
+        if opts.excludes.is_match(name) {
+            continue;
+        }
+        match stat_input_raw(input, opts.follow_symlinks) {
+            Ok(_) => valid.push(input.clone()),
+            Err(source) if opts.ignore_failed_read => {
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "rz: warning: cannot read `{input}`: {source}");
+            }
+            Err(source) => {
+                return Err(Error::CannotReadInput {
+                    path: input.clone(),
+                    source,
+                });
+            }
+        }
+    }
+    if valid.is_empty() {
+        return Err(Error::NoReadableInputs);
+    }
+    Ok(valid)
+}
+
 // ── Stdout extraction ────────────────────────────────────────────────────────
 
 /// Extract matching tar entries to a writer (typically stdout), skipping

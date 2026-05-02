@@ -12,6 +12,8 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
+
     let file = fs_err::File::create(output)?;
     let mut zip = ZipWriter::new(file);
 
@@ -19,12 +21,9 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
         .compression_method(CompressionMethod::Deflated)
         .compression_level(opts.level.map(i64::from));
 
-    for input in inputs {
+    for input in &inputs {
         let meta = filter::input_metadata(input, opts.follow_symlinks)?;
         let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
-            continue;
-        }
         if !opts.follow_symlinks && meta.file_type().is_symlink() {
             write_symlink_entry(&mut zip, input, name, options, opts)?;
         } else if meta.is_dir() {

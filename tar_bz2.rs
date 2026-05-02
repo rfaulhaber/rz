@@ -12,6 +12,7 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let compression = match opts.level {
         Some(l) => Compression::try_new(l)
             .ok_or_else(|| std::io::Error::other("bzip2 compression level must be 1..=9"))?,
@@ -23,7 +24,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     let mut builder = tar::Builder::new(bz);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     // Explicit finalization: Builder → BzEncoder → BufWriter → File
     let bz = builder.into_inner()?;
@@ -41,6 +42,7 @@ pub fn compress_to_writer<W: std::io::Write>(
     writer: W,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let inputs = filter::validate_inputs(inputs, opts)?;
     let compression = match opts.level {
         Some(l) => Compression::try_new(l)
             .ok_or_else(|| std::io::Error::other("bzip2 compression level must be 1..=9"))?,
@@ -51,7 +53,7 @@ pub fn compress_to_writer<W: std::io::Write>(
     let mut builder = tar::Builder::new(bz);
     builder.follow_symlinks(opts.follow_symlinks);
 
-    filter::append_inputs(&mut builder, inputs, opts)?;
+    filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let bz = builder.into_inner()?;
     bz.finish()?;

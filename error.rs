@@ -77,4 +77,17 @@ pub enum Error {
         operation: &'static str,
         format: String,
     },
+
+    #[error("cannot read input `{path}`: {source}")]
+    CannotReadInput {
+        path: Utf8PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
+    #[error(
+        "no readable inputs (all paths were missing, unreadable, or excluded); \
+         refusing to write an empty archive"
+    )]
+    NoReadableInputs,
 }
