@@ -217,11 +217,12 @@ rz info mydir.tar.gz --human-readable
 
 | Flag               | Description                              |
 |--------------------|------------------------------------------|
-| `-p`, `--progress` | Show a progress bar                      |
-| `-v`, `--verbose`  | Print each entry name to stderr          |
-| `-q`, `--quiet`    | Suppress all non-error output            |
-| `-V`, `--version`  | Print version                            |
-| `-h`, `--help`     | Print help                               |
+| `-p`, `--progress`   | Show a progress bar                                               |
+| `-v`, `--verbose`    | Print each entry name to stderr                                   |
+| `-q`, `--quiet`      | Suppress all non-error output                                     |
+| `--threads N`        | Worker threads for parallel operations (0 = auto-detect)          |
+| `-V`, `--version`    | Print version                                                     |
+| `-h`, `--help`       | Print help                                                        |
 
 ## Feature flags
 

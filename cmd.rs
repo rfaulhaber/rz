@@ -23,6 +23,11 @@ pub struct Cli {
     /// Suppress all non-error output
     #[arg(short, long, global = true)]
     pub quiet: bool,
+
+    /// Worker thread count for parallel operations (gzip/zstd compression,
+    /// zip decompression). 0 = auto-detect (default).
+    #[arg(long, value_name = "N", global = true)]
+    pub threads: Option<usize>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -450,4 +455,39 @@ fn parse_octal_mode(s: &str) -> std::result::Result<u32, String> {
         ));
     }
     Ok(mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn threads_flag_parses() -> TestResult {
+        let cli = Cli::try_parse_from(["rz", "--threads", "4", "compress", "."])?;
+        assert_eq!(cli.threads, Some(4));
+        Ok(())
+    }
+
+    #[test]
+    fn threads_zero_parses() -> TestResult {
+        let cli = Cli::try_parse_from(["rz", "--threads", "0", "compress", "."])?;
+        assert_eq!(cli.threads, Some(0));
+        Ok(())
+    }
+
+    #[test]
+    fn threads_absent_is_none() -> TestResult {
+        let cli = Cli::try_parse_from(["rz", "compress", "."])?;
+        assert_eq!(cli.threads, None);
+        Ok(())
+    }
+
+    #[test]
+    fn threads_after_subcommand_parses() -> TestResult {
+        let cli = Cli::try_parse_from(["rz", "compress", "--threads", "2", "."])?;
+        assert_eq!(cli.threads, Some(2));
+        Ok(())
+    }
 }

@@ -15,6 +15,13 @@ use rz::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zi
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(n) = cli.threads
+        && n > 0
+    {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global();
+    }
     if let Err(e) = run(cli) {
         let mut stderr = std::io::stderr().lock();
         let _ = writeln!(stderr, "rz: {e}");
