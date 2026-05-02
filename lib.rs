@@ -62,6 +62,8 @@ pub struct CompressOpts<'a> {
     /// skipped instead of aborting the whole archive.  An empty result still
     /// errors out — we never produce an empty archive.
     pub ignore_failed_read: bool,
+    /// Password for encrypting the archive (zip and 7z only).
+    pub password: Option<String>,
 }
 
 /// Options for decompress operations.
@@ -87,6 +89,8 @@ pub struct DecompressOpts<'a> {
     /// Prefix prepended to every entry path after renames.
     pub prefix: Option<Utf8PathBuf>,
     pub progress: &'a dyn ProgressReport,
+    /// Password for decrypting the archive (zip and 7z only).
+    pub password: Option<String>,
 }
 
 impl CompressOpts<'_> {
@@ -106,6 +110,7 @@ impl CompressOpts<'_> {
             newer_than: None,
             older_than: None,
             ignore_failed_read: false,
+            password: None,
         }
     }
 }
@@ -134,6 +139,7 @@ impl DecompressOpts<'_> {
             renames: Vec::new(),
             prefix: None,
             progress: &NoProgress,
+            password: None,
         }
     }
 }

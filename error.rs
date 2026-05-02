@@ -96,4 +96,13 @@ pub enum Error {
 
     #[error("convert: cannot infer output format; specify --to or --output with an extension")]
     ConvertCannotInferOutputFormat,
+
+    #[error("encryption is not supported for {0} format (only zip and 7z)")]
+    EncryptionUnsupported(String),
+
+    #[error("archive is encrypted; provide --password-stdin, --password-file, or --password")]
+    PasswordRequired,
+
+    #[error("password is empty")]
+    EmptyPassword,
 }

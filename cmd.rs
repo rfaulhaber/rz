@@ -2,6 +2,27 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
+/// Password source flags (mutually exclusive).
+///
+/// Use `--password-stdin` to read from stdin (recommended — not visible in
+/// process list or shell history).  `--password-file` reads the first line of
+/// a file.  `--password` accepts an inline value that IS visible to other
+/// processes via `ps` and is recorded in shell history — use with caution.
+#[derive(Debug, clap::Args, Clone, Default)]
+pub struct PasswordArgs {
+    /// Read password from stdin (recommended — not visible in process list)
+    #[arg(long, conflicts_with_all = ["password_file", "password"])]
+    pub password_stdin: bool,
+
+    /// Read password from a file (first line, whitespace-trimmed)
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["password_stdin", "password"])]
+    pub password_file: Option<Utf8PathBuf>,
+
+    /// Inline password (UNSAFE — visible in process list and shell history)
+    #[arg(long, value_name = "STRING", conflicts_with_all = ["password_stdin", "password_file"])]
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "rz",
@@ -125,6 +146,10 @@ pub enum Command {
         /// after skipping still errors — we never write an empty archive.
         #[arg(long)]
         ignore_failed_read: bool,
+
+        /// Password source for encrypted archives (zip and 7z only)
+        #[command(flatten)]
+        password_args: PasswordArgs,
     },
 
     /// Decompress an archive
@@ -226,6 +251,10 @@ pub enum Command {
 
         /// Extract only these specific paths from the archive
         paths: Vec<String>,
+
+        /// Password source for encrypted archives (zip and 7z only)
+        #[command(flatten)]
+        password_args: PasswordArgs,
     },
 
     /// List archive contents
@@ -259,6 +288,10 @@ pub enum Command {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Password source for encrypted archives (zip and 7z only)
+        #[command(flatten)]
+        password_args: PasswordArgs,
     },
 
     /// Test archive integrity (fully decompress without writing to disk)
@@ -268,6 +301,10 @@ pub enum Command {
 
         #[arg(short, long)]
         format: Option<Format>,
+
+        /// Password source for encrypted archives (zip and 7z only)
+        #[command(flatten)]
+        password_args: PasswordArgs,
     },
 
     /// Show archive metadata
@@ -284,6 +321,10 @@ pub enum Command {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Password source for encrypted archives (zip and 7z only)
+        #[command(flatten)]
+        password_args: PasswordArgs,
     },
 
     /// List supported archive formats

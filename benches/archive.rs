@@ -119,6 +119,22 @@ struct FormatDesc {
     test: fn(&Utf8Path, &dyn rz::progress::ProgressReport) -> rz::error::Result<()>,
 }
 
+/// Wrapper for `zip::test` that drops the password parameter for the benchmark.
+fn zip_test_bench(
+    path: &Utf8Path,
+    progress: &dyn rz::progress::ProgressReport,
+) -> rz::error::Result<()> {
+    zip::test(path, None, progress)
+}
+
+/// Wrapper for `seven_z::test` that drops the password parameter for the benchmark.
+fn seven_z_test_bench(
+    path: &Utf8Path,
+    progress: &dyn rz::progress::ProgressReport,
+) -> rz::error::Result<()> {
+    seven_z::test(path, None, progress)
+}
+
 const FORMATS: &[FormatDesc] = &[
     FormatDesc {
         name: "zip",
@@ -127,7 +143,7 @@ const FORMATS: &[FormatDesc] = &[
         decompress: zip::decompress,
         list: zip::list,
         info: zip::info,
-        test: zip::test,
+        test: zip_test_bench,
     },
     FormatDesc {
         name: "tar",
@@ -172,7 +188,7 @@ const FORMATS: &[FormatDesc] = &[
         decompress: seven_z::decompress,
         list: seven_z::list,
         info: seven_z::info,
-        test: seven_z::test,
+        test: seven_z_test_bench,
     },
 ];
 

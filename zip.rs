@@ -3,7 +3,7 @@ use std::io;
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::{AesMode, CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::error::{Error, Result};
 use crate::filter;
@@ -17,27 +17,57 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     let file = fs_err::File::create(output)?;
     let mut zip = ZipWriter::new(file);
 
-    let options = SimpleFileOptions::default()
+    let base_options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .compression_level(opts.level.map(i64::from));
 
-    for input in &inputs {
-        let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if !opts.follow_symlinks && meta.file_type().is_symlink() {
-            write_symlink_entry(&mut zip, input, name, options, opts)?;
-        } else if meta.is_dir() {
-            if opts.no_recursion {
-                zip.add_directory(format!("{name}/"), options)?;
+    // When encryption is active the lifetime of `FileOptions` is tied to the
+    // password string, so we must hold the two branches separately.
+    // When encryption is active the lifetime of `FileOptions` is tied to the
+    // password string.  Both `FileOptions<'static, ()>` (no password) and
+    // `FileOptions<'_, ()>` (with password) satisfy the same trait bounds, so
+    // we dispatch through the same helpers — just from two branches to keep the
+    // borrow checker happy about the lifetime of `options`.
+    if let Some(ref pwd) = opts.password {
+        let options = base_options.with_aes_encryption(AesMode::Aes256, pwd.as_str());
+        for input in &inputs {
+            let meta = filter::input_metadata(input, opts.follow_symlinks)?;
+            let name = input.file_name().unwrap_or(input.as_str());
+            if !opts.follow_symlinks && meta.file_type().is_symlink() {
+                write_symlink_entry(&mut zip, input, name, options, opts)?;
+            } else if meta.is_dir() {
+                if opts.no_recursion {
+                    zip.add_directory(format!("{name}/"), options)?;
+                } else {
+                    add_dir_walked(&mut zip, input, name, options, opts)?;
+                }
             } else {
-                add_dir_walked(&mut zip, input, name, options, opts)?;
+                zip.start_file(name, options)?;
+                let mut f = fs_err::File::open(input)?;
+                let size = io::copy(&mut f, &mut zip)?;
+                opts.progress.set_entry(name);
+                opts.progress.inc(size);
             }
-        } else {
-            zip.start_file(name, options)?;
-            let mut f = fs_err::File::open(input)?;
-            let size = io::copy(&mut f, &mut zip)?;
-            opts.progress.set_entry(name);
-            opts.progress.inc(size);
+        }
+    } else {
+        for input in &inputs {
+            let meta = filter::input_metadata(input, opts.follow_symlinks)?;
+            let name = input.file_name().unwrap_or(input.as_str());
+            if !opts.follow_symlinks && meta.file_type().is_symlink() {
+                write_symlink_entry(&mut zip, input, name, base_options, opts)?;
+            } else if meta.is_dir() {
+                if opts.no_recursion {
+                    zip.add_directory(format!("{name}/"), base_options)?;
+                } else {
+                    add_dir_walked(&mut zip, input, name, base_options, opts)?;
+                }
+            } else {
+                zip.start_file(name, base_options)?;
+                let mut f = fs_err::File::open(input)?;
+                let size = io::copy(&mut f, &mut zip)?;
+                opts.progress.set_entry(name);
+                opts.progress.inc(size);
+            }
         }
     }
 
@@ -48,11 +78,11 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
 
 /// Walk a directory using [`filter::walk_dir`] and add entries to a zip archive.
 /// Handles symlinks, regular files, and subdirectories.
-fn add_dir_walked(
+fn add_dir_walked<'k>(
     zip: &mut ZipWriter<fs_err::File>,
     dir: &Utf8Path,
     prefix: &str,
-    options: SimpleFileOptions,
+    options: zip::write::FileOptions<'k, ()>,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     filter::walk_dir(dir, prefix, opts, &mut |entry| {
@@ -76,15 +106,16 @@ fn add_dir_walked(
     })
 }
 
+
 /// Store a symlink as a symlink entry (POSIX-style, with `S_IFLNK` mode and
 /// the link target as the entry content). The `zip` crate sets `0o777`
 /// permissions by default; Windows unzip tools may materialise this as a
 /// regular text file containing the target path.
-fn write_symlink_entry(
+fn write_symlink_entry<'k>(
     zip: &mut ZipWriter<fs_err::File>,
     link_path: &Utf8Path,
     archive_name: &str,
-    options: SimpleFileOptions,
+    options: zip::write::FileOptions<'k, ()>,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let target = fs_err::read_link(link_path)?;
@@ -96,6 +127,7 @@ fn write_symlink_entry(
     opts.progress.inc(target_str.len() as u64);
     Ok(())
 }
+
 
 /// Extract a zip symlink entry to `out_path`.
 ///
@@ -154,6 +186,7 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
         (archive.len(), archive.metadata())
     };
 
+    let password = opts.password.clone();
     (0..len).into_par_iter().try_for_each_init(
         || -> Option<ZipArchive<fs_err::File>> {
             let file = fs_err::File::open(input).ok()?;
@@ -164,7 +197,7 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             let archive = maybe_archive
                 .as_mut()
                 .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
-            let mut entry = archive.by_index(i)?;
+            let mut entry = open_zip_entry(archive, i, password.as_deref())?;
             let name = Utf8PathBuf::from(entry.name());
 
             // Reject entries that attempt path traversal.
@@ -279,7 +312,7 @@ pub fn decompress_to_writer<W: std::io::Write>(
     let mut archive = ZipArchive::new(file)?;
 
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
+        let mut entry = open_zip_entry(&mut archive, i, opts.password.as_deref())?;
         let name = Utf8PathBuf::from(entry.name());
 
         // Reject entries that attempt path traversal.
@@ -316,13 +349,18 @@ pub fn decompress_to_writer<W: std::io::Write>(
 
 // ── Test ──────────────────────────────────────────────────────────────────────
 
-pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
+pub fn test(
+    input: &Utf8Path,
+    password: Option<&str>,
+    progress: &dyn crate::progress::ProgressReport,
+) -> Result<()> {
     let (len, shared_metadata) = {
         let file = fs_err::File::open(input)?;
         let archive = ZipArchive::new(file)?;
         (archive.len(), archive.metadata())
     };
 
+    let password = password.map(str::to_owned);
     (0..len).into_par_iter().try_for_each_init(
         || -> Option<ZipArchive<fs_err::File>> {
             let file = fs_err::File::open(input).ok()?;
@@ -333,7 +371,7 @@ pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) ->
             let archive = maybe_archive
                 .as_mut()
                 .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
-            let mut entry = archive.by_index(i)?;
+            let mut entry = open_zip_entry(archive, i, password.as_deref())?;
             let name = entry.name().to_owned();
             progress.set_entry(&name);
             let written = io::copy(&mut entry, &mut io::sink())?;
@@ -402,6 +440,28 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Open a zip entry by index, decrypting with `password` when provided.
+///
+/// If no password is supplied but the entry IS encrypted, returns
+/// `Error::PasswordRequired` rather than a cryptic `UnsupportedArchive` error.
+fn open_zip_entry<'a>(
+    archive: &'a mut ZipArchive<fs_err::File>,
+    index: usize,
+    password: Option<&str>,
+) -> Result<zip::read::ZipFile<'a, fs_err::File>> {
+    if let Some(pwd) = password {
+        Ok(archive.by_index_decrypt(index, pwd.as_bytes())?)
+    } else {
+        // Peek at the raw entry to check if it's encrypted before attempting
+        // to open it without a password.
+        let encrypted = archive.by_index_raw(index)?.encrypted();
+        if encrypted {
+            return Err(Error::PasswordRequired);
+        }
+        Ok(archive.by_index(index)?)
+    }
+}
 
 /// Convert a zip `DateTime` to a unix epoch (seconds since 1970-01-01).
 /// Returns 0 for any invalid or pre-epoch date.

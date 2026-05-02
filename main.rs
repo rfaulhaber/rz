@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{CommandFactory, Parser};
 
-use rz::cmd::{Cli, Command, Format, SortField};
+use rz::cmd::{Cli, Command, Format, PasswordArgs, SortField};
 use rz::error::{Error, Result};
 use rz::filter;
 use rz::format::{resolve_compress_format, resolve_input_format};
@@ -13,6 +13,56 @@ use rz::progress::{BarProgress, NoProgress, ProgressReport, VerboseReport};
 use rz::tar_bz2;
 use rz::modify::{self, AppendMode};
 use rz::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
+
+/// Resolve a password from any of the three password-source flags.
+///
+/// Returns `Ok(None)` when no flag is set.  Returns an error when:
+/// - `--password-stdin` is set and stdin is empty.
+/// - `--password-file PATH` is set and the first line is empty or the file
+///   cannot be read.
+fn resolve_password(args: &PasswordArgs) -> Result<Option<String>> {
+    if args.password_stdin {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_line(&mut buf)
+            .map_err(Error::Io)?;
+        // Strip one trailing \r\n or \n.
+        if buf.ends_with('\n') {
+            buf.pop();
+            if buf.ends_with('\r') {
+                buf.pop();
+            }
+        }
+        if buf.is_empty() {
+            return Err(Error::EmptyPassword);
+        }
+        return Ok(Some(buf));
+    }
+    if let Some(ref path) = args.password_file {
+        let content = fs_err::read_to_string(path)?;
+        let line = content.lines().next().unwrap_or("").to_owned();
+        if line.is_empty() {
+            return Err(Error::EmptyPassword);
+        }
+        return Ok(Some(line));
+    }
+    if let Some(ref pw) = args.password {
+        return Ok(Some(pw.clone()));
+    }
+    Ok(None)
+}
+
+/// Reject encryption flags for formats that don't support it (everything
+/// except zip and 7z).
+fn reject_encryption_for_non_supported(fmt: &Format, password: &Option<String>) -> Result<()> {
+    if password.is_none() {
+        return Ok(());
+    }
+    if matches!(fmt, Format::Zip | Format::SevenZ) {
+        return Ok(());
+    }
+    Err(Error::EncryptionUnsupported(fmt.to_string()))
+}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -127,7 +177,9 @@ fn run(cli: Cli) -> Result<()> {
             newer_than,
             older_than,
             ignore_failed_read,
+            password_args,
         } => {
+            let password = resolve_password(&password_args)?;
             let level = if store { Some(0) } else { level };
 
             // Merge --files-from paths into input list.
@@ -166,6 +218,7 @@ fn run(cli: Cli) -> Result<()> {
                     newer_than,
                     older_than,
                     ignore_failed_read,
+                    password: None,
                 };
                 let paths = filter::collect_compress_paths(&input, &dry_opts)?;
                 let mut stdout = std::io::stdout().lock();
@@ -196,6 +249,10 @@ fn run(cli: Cli) -> Result<()> {
                 &fmt, mtime, owner, group, mode, newer_than, older_than,
             )?;
 
+            // Encryption is only supported for zip and 7z; reject early for
+            // tar-family so the user gets a clear message before any I/O.
+            reject_encryption_for_non_supported(&fmt, &password)?;
+
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !to_stdout {
                 Box::new(BarProgress::spinner())
             } else if totals {
@@ -224,6 +281,7 @@ fn run(cli: Cli) -> Result<()> {
                 newer_than,
                 older_than,
                 ignore_failed_read,
+                password,
             };
 
             if to_stdout {
@@ -291,7 +349,9 @@ fn run(cli: Cli) -> Result<()> {
             prefix,
             paths,
             one_top_level,
+            password_args,
         } => {
+            let password = resolve_password(&password_args)?;
             let from_stdin = is_stdio(input.as_str());
 
             let fmt = if from_stdin {
@@ -408,6 +468,8 @@ fn run(cli: Cli) -> Result<()> {
                 });
             }
 
+            reject_encryption_for_non_supported(&fmt, &password)?;
+
             let opts = DecompressOpts {
                 force,
                 no_overwrite,
@@ -424,6 +486,7 @@ fn run(cli: Cli) -> Result<()> {
                 renames: rename,
                 prefix,
                 progress,
+                password,
             };
 
             if to_stdout {
@@ -520,8 +583,11 @@ fn run(cli: Cli) -> Result<()> {
             sort,
             human_readable,
             json,
+            password_args,
         } => {
+            let password = resolve_password(&password_args)?;
             let fmt = resolve_input_format(format, &input)?;
+            reject_encryption_for_non_supported(&fmt, &password)?;
             let mut entries = match fmt {
                 Format::Zip => zip::list(&input)?,
                 Format::Tar => tar::list(&input)?,
@@ -572,8 +638,14 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Command::Test { input, format } => {
+        Command::Test {
+            input,
+            format,
+            password_args,
+        } => {
+            let password = resolve_password(&password_args)?;
             let fmt = resolve_input_format(format, &input)?;
+            reject_encryption_for_non_supported(&fmt, &password)?;
             let base_progress: Box<dyn ProgressReport> = if cli.progress {
                 let file_size = fs_err::metadata(&input)?.len();
                 Box::new(BarProgress::bytes(file_size))
@@ -588,14 +660,14 @@ fn run(cli: Cli) -> Result<()> {
                 &*base_progress
             };
             match fmt {
-                Format::Zip => zip::test(&input, progress)?,
+                Format::Zip => zip::test(&input, password.as_deref(), progress)?,
                 Format::Tar => tar::test(&input, progress)?,
                 Format::TarGz => tar_gz::test(&input, progress)?,
                 Format::TarZst => tar_zst::test(&input, progress)?,
                 Format::TarXz => tar_xz::test(&input, progress)?,
                 #[cfg(feature = "bzip2")]
                 Format::TarBz2 => tar_bz2::test(&input, progress)?,
-                Format::SevenZ => seven_z::test(&input, progress)?,
+                Format::SevenZ => seven_z::test(&input, password.as_deref(), progress)?,
                 #[allow(unreachable_patterns)]
                 other => return Err(Error::UnsupportedFormat(other.to_string())),
             }
@@ -611,8 +683,11 @@ fn run(cli: Cli) -> Result<()> {
             format,
             human_readable,
             json,
+            password_args,
         } => {
+            let password = resolve_password(&password_args)?;
             let fmt = resolve_input_format(format, &input)?;
+            reject_encryption_for_non_supported(&fmt, &password)?;
             let info = match fmt {
                 Format::Zip => zip::info(&input)?,
                 Format::Tar => tar::info(&input)?,
@@ -758,6 +833,7 @@ fn run_append(
         newer_than: None,
         older_than: None,
         ignore_failed_read: false,
+        password: None,
     };
     modify::append(&archive, fmt, &input, mode, &opts)?;
     progress.finish();

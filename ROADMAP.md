@@ -24,10 +24,13 @@ established archive tools (`tar`, `bsdtar`, `zip`/`unzip`, `7z`, `pigz`,
    compression layer — implementation is read-then-rewrite. Uncompressed tar
    and zip support in-place append.
 
-3. **Encryption** *(zip AES-256, 7z AES-256)*
-   `--password` / `--password-file` / `--password-stdin`. The `zip` crate
-   supports AES and ZipCrypto; `sevenz-rust2` has encryption. Default to
-   `--password-stdin` for safety.
+3. ~~**Encryption** *(zip AES-256, 7z AES-256)*~~ — **DONE.**
+   `--password-stdin` / `--password-file` / `--password` flags on all
+   five subcommands (`compress`, `decompress`, `list`, `test`, `info`).
+   Zip uses AES-256 via `zip::write::SimpleFileOptions::with_aes_encryption`;
+   7z uses AES-256-SHA-256 via `sevenz_rust2::AesEncoderOptions`.  Tar-family
+   formats reject the flags up front.  Integration coverage in
+   `tests/encryption.rs`.
 
 4. **Ownership/permission preservation symmetry** — **DONE.**
    - Compress: `--mtime` / `--owner` / `--group` / `--mode` override the

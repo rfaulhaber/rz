@@ -1,4 +1,6 @@
 use camino::{Utf8Path, Utf8PathBuf};
+use sevenz_rust2::encoder_options::AesEncoderOptions;
+use sevenz_rust2::{EncoderConfiguration, EncoderMethod, Password};
 
 use crate::error::{Error, Result};
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
@@ -29,6 +31,22 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     let inputs = crate::filter::validate_inputs(inputs, opts)?;
 
     let mut writer = sevenz_rust2::ArchiveWriter::create(output)?;
+
+    // When a password is set, configure AES-256 as the outermost layer on top
+    // of LZMA2.  The method vec order mirrors the 7z encoder pipeline: each
+    // element wraps the output of the previous one, so AES (index 0) is the
+    // innermost encoder as written but the OUTERMOST layer in the archive
+    // (i.e. the first thing a reader must peel off).
+    //
+    // The sevenz-rust2 test suite uses [AesEncoderOptions, Lzma2Options] for
+    // encrypted archives, which matches the canonical 7z tool's pipeline order.
+    if let Some(pwd) = &opts.password {
+        let aes_cfg: EncoderConfiguration =
+            AesEncoderOptions::new(Password::from(pwd.as_str())).into();
+        let lzma2_cfg = EncoderConfiguration::new(EncoderMethod::LZMA2);
+        writer.set_content_methods(vec![aes_cfg, lzma2_cfg]);
+    }
+
     for input in &inputs {
         let meta = crate::filter::input_metadata(input, opts.follow_symlinks)?;
         if meta.is_dir() && opts.no_recursion {
@@ -89,9 +107,16 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     // options are active.  Otherwise we need the callback to enforce
     // overwrite guards, include/exclude, and backup logic.
     if can_fast_path(opts) {
-        sevenz_rust2::decompress_file(input, output)?;
+        if let Some(pwd) = &opts.password {
+            let file = fs_err::File::open(input)?;
+            sevenz_rust2::decompress_with_password(file, output, Password::from(pwd.as_str()))?;
+        } else {
+            sevenz_rust2::decompress_file(input, output)?;
+        }
     } else {
-        sevenz_rust2::decompress_file_with_extract_fn(input, output, |entry, reader, dest| {
+        let file = fs_err::File::open(input)?;
+        let password = opts.password.as_deref().map_or_else(Password::empty, Password::from);
+        sevenz_rust2::decompress_with_extract_fn_and_password(file, output, password, |entry, reader, dest| {
             // Reject entries that attempt path traversal.
             crate::filter::safe_entry_path(&entry.name).map_err(|e| {
                 sevenz_rust2::Error::Io(
@@ -172,7 +197,9 @@ pub fn decompress_to_writer<W: std::io::Write>(
     if opts.strip_components > 0 {
         return Err(Error::StripComponentsUnsupported("7z".to_owned()));
     }
-    sevenz_rust2::decompress_file_with_extract_fn(input, ".", |entry, reader, _dest| {
+    let file = fs_err::File::open(input)?;
+    let password = opts.password.as_deref().map(Password::from).unwrap_or_else(Password::empty);
+    sevenz_rust2::decompress_with_extract_fn_and_password(file, ".", password, |entry, reader, _dest| {
         // Reject entries that attempt path traversal.
         crate::filter::safe_entry_path(&entry.name).map_err(|e| {
             sevenz_rust2::Error::Io(
@@ -204,8 +231,14 @@ pub fn decompress_to_writer<W: std::io::Write>(
 
 // ── Test ──────────────────────────────────────────────────────────────────────
 
-pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
-    sevenz_rust2::decompress_file_with_extract_fn(input, ".", |entry, reader, _dest| {
+pub fn test(
+    input: &Utf8Path,
+    password: Option<&str>,
+    progress: &dyn crate::progress::ProgressReport,
+) -> Result<()> {
+    let file = fs_err::File::open(input)?;
+    let pwd = password.map_or_else(Password::empty, Password::from);
+    sevenz_rust2::decompress_with_extract_fn_and_password(file, ".", pwd, |entry, reader, _dest| {
         progress.set_entry(&entry.name);
         let written = std::io::copy(reader, &mut std::io::sink())
             .map_err(|e| sevenz_rust2::Error::Io(e, "test: reading entry".into()))?;

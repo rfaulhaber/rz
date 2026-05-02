@@ -257,6 +257,34 @@ rz info mydir.tar.gz --human-readable
 | `-V`, `--version`    | Print version                                                     |
 | `-h`, `--help`       | Print help                                                        |
 
+## Encryption
+
+ZIP and 7z archives support AES-256 encryption.  Three mutually exclusive
+password sources are available on all subcommands (`compress`, `decompress`,
+`list`, `test`, `info`):
+
+| Flag | Description |
+|------|-------------|
+| `--password-stdin` | Read password from stdin — **recommended** (not visible in process list or shell history) |
+| `--password-file PATH` | Read first line of a file, trimmed of trailing whitespace |
+| `--password STRING` | Inline password — **UNSAFE** (visible via `ps` and recorded in shell history) |
+
+```sh
+# Compress with password (recommended — reads from stdin)
+echo "mypassword" | rz compress secret.txt -o secret.zip --password-stdin
+
+# Decompress
+echo "mypassword" | rz decompress secret.zip --password-stdin
+
+# 7z also supported
+echo "mypassword" | rz compress secret.txt -o secret.7z --password-stdin
+echo "mypassword" | rz decompress secret.7z -o ./out --password-stdin
+```
+
+Tar-based formats (`tar`, `tar.gz`, `tar.zst`, `tar.xz`, `tar.bz2`) do not
+support encryption — `rz` will reject the password flags up front with a clear
+error message.
+
 ## Feature flags
 
 | Feature  | Effect                                             |

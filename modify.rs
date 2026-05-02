@@ -221,6 +221,7 @@ fn filtered_opts<'a>(
         newer_than: opts.newer_than,
         older_than: opts.older_than,
         ignore_failed_read: opts.ignore_failed_read,
+        password: opts.password.clone(),
     }
 }
 
