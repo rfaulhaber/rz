@@ -5,6 +5,16 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Multi-format archive tool — tar, zip, 7z with a unified CLI"
 repository = "https://codeberg.org/ryf/rz"
+exclude = [
+    "/.github/",
+    "/.envrc",
+    "/.gitignore",
+    "/CLAUDE.md",
+    "/clippy.toml",
+    "/flake.lock",
+    "/flake.nix",
+    "/rust-toolchain.toml"
+]
 
 [[bin]]
 name = "rz"
