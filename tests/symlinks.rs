@@ -6,7 +6,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use globset::GlobSet;
 use helpers::{TestResult, temp_utf8_dir};
 
-use rz::{CompressOpts, DecompressOpts};
+use rz_archive::{CompressOpts, DecompressOpts};
 
 fn compress_opts() -> CompressOpts<'static> {
     CompressOpts::new(None, GlobSet::empty())
@@ -26,11 +26,11 @@ fn tar_preserves_symlinks_by_default() -> TestResult {
     symlink("real.txt", tree.join("link.txt").as_std_path())?;
 
     let archive = tmp.join("archive.tar");
-    rz::tar::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    rz::tar::decompress(&archive, &out, &decompress_opts())?;
+    rz_archive::tar::decompress(&archive, &out, &decompress_opts())?;
 
     let link = out.join("tree/link.txt");
     let meta = fs_err::symlink_metadata(&link)?;
@@ -57,11 +57,11 @@ fn tar_follow_symlinks_dereferences() -> TestResult {
     let archive = tmp.join("archive.tar");
     let mut opts = compress_opts();
     opts.follow_symlinks = true;
-    rz::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    rz::tar::decompress(&archive, &out, &decompress_opts())?;
+    rz_archive::tar::decompress(&archive, &out, &decompress_opts())?;
 
     let link = out.join("tree/link.txt");
     let meta = fs_err::symlink_metadata(&link)?;
@@ -77,7 +77,7 @@ fn tar_follow_symlinks_dereferences() -> TestResult {
 #[test]
 fn tar_rejects_absolute_symlink_target() -> TestResult {
     // Build a tar archive containing a symlink `evil` whose target is the
-    // absolute path `/tmp/rz-escape`.  Extraction must refuse this rather
+    // absolute path `/tmp/rz_archive-escape`.  Extraction must refuse this rather
     // than silently creating the symlink.
     let (_guard, tmp) = temp_utf8_dir()?;
 
@@ -90,13 +90,13 @@ fn tar_rejects_absolute_symlink_target() -> TestResult {
         header.set_size(0);
         header.set_mode(0o777);
         header.set_cksum();
-        builder.append_link(&mut header, "evil", "/tmp/rz-escape")?;
+        builder.append_link(&mut header, "evil", "/tmp/rz_archive-escape")?;
         builder.finish()?;
     }
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    let res = rz::tar::decompress(&archive, &out, &decompress_opts());
+    let res = rz_archive::tar::decompress(&archive, &out, &decompress_opts());
     assert!(
         res.is_err(),
         "extraction should reject absolute symlink target"
@@ -125,7 +125,7 @@ fn tar_rejects_parent_dir_symlink_target() -> TestResult {
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    let res = rz::tar::decompress(&archive, &out, &decompress_opts());
+    let res = rz_archive::tar::decompress(&archive, &out, &decompress_opts());
     assert!(
         res.is_err(),
         "extraction should reject ..-containing symlink target"
@@ -142,11 +142,11 @@ fn tar_handles_broken_symlink() -> TestResult {
     symlink("does-not-exist", tree.join("dangling").as_std_path())?;
 
     let archive = tmp.join("archive.tar");
-    rz::tar::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    rz::tar::decompress(&archive, &out, &decompress_opts())?;
+    rz_archive::tar::decompress(&archive, &out, &decompress_opts())?;
 
     let link = out.join("tree/dangling");
     let meta = fs_err::symlink_metadata(&link)?;
@@ -164,11 +164,11 @@ fn zip_preserves_symlinks_by_default() -> TestResult {
     symlink("real.txt", tree.join("link.txt").as_std_path())?;
 
     let archive = tmp.join("archive.zip");
-    rz::zip::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
+    rz_archive::zip::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    rz::zip::decompress(&archive, &out, &decompress_opts())?;
+    rz_archive::zip::decompress(&archive, &out, &decompress_opts())?;
 
     let link = out.join("tree/link.txt");
     let meta = fs_err::symlink_metadata(&link)?;
@@ -193,18 +193,18 @@ fn zip_overwrites_existing_symlink_on_force() -> TestResult {
     symlink("real.txt", tree.join("link.txt").as_std_path())?;
 
     let archive = tmp.join("archive.zip");
-    rz::zip::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
+    rz_archive::zip::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
 
     // First extraction creates the symlink.
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    rz::zip::decompress(&archive, &out, &decompress_opts())?;
+    rz_archive::zip::decompress(&archive, &out, &decompress_opts())?;
 
     // Second extraction with --force must replace the existing symlink without
     // writing through it to the target.
     let mut opts = decompress_opts();
     opts.force = true;
-    rz::zip::decompress(&archive, &out, &opts)?;
+    rz_archive::zip::decompress(&archive, &out, &opts)?;
 
     let link = out.join("tree/link.txt");
     let meta = fs_err::symlink_metadata(&link)?;
@@ -225,7 +225,7 @@ fn zip_top_level_symlink_is_preserved() -> TestResult {
     symlink("real.txt", link.as_std_path())?;
 
     let archive = tmp.join("archive.zip");
-    rz::zip::compress(&[Utf8PathBuf::from(&link)], &archive, &compress_opts())?;
+    rz_archive::zip::compress(&[Utf8PathBuf::from(&link)], &archive, &compress_opts())?;
 
     let file = fs_err::File::open(&archive)?;
     let mut z = ::zip::ZipArchive::new(file)?;

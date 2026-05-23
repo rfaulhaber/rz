@@ -13,9 +13,9 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use helpers::{TestResult, default_compress_opts, default_decompress_opts, temp_utf8_dir};
-use rz::cmd::Format;
-use rz::error::Result as RzResult;
-use rz::modify::{self, AppendMode};
+use rz_archive::cmd::Format;
+use rz_archive::error::Result as RzResult;
+use rz_archive::modify::{self, AppendMode};
 
 // ── small helpers local to this file ─────────────────────────────────────────
 
@@ -29,16 +29,16 @@ fn write_file(dir: &Utf8Path, name: &str, body: &[u8]) -> std::io::Result<Utf8Pa
 /// Sorted list of every entry name in `archive`, dispatched by format.
 fn list_names(archive: &Utf8Path, fmt: Format) -> RzResult<Vec<String>> {
     let entries = match fmt {
-        Format::Tar => rz::tar::list(archive)?,
-        Format::TarGz => rz::tar_gz::list(archive)?,
-        Format::TarZst => rz::tar_zst::list(archive)?,
-        Format::TarXz => rz::tar_xz::list(archive)?,
+        Format::Tar => rz_archive::tar::list(archive)?,
+        Format::TarGz => rz_archive::tar_gz::list(archive)?,
+        Format::TarZst => rz_archive::tar_zst::list(archive)?,
+        Format::TarXz => rz_archive::tar_xz::list(archive)?,
         #[cfg(feature = "bzip2")]
-        Format::TarBz2 => rz::tar_bz2::list(archive)?,
+        Format::TarBz2 => rz_archive::tar_bz2::list(archive)?,
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => return Err(rz::error::Error::UnsupportedFormat("tar.bz2".into())),
-        Format::Zip => rz::zip::list(archive)?,
-        Format::SevenZ => rz::seven_z::list(archive)?,
+        Format::TarBz2 => return Err(rz_archive::error::Error::UnsupportedFormat("tar.bz2".into())),
+        Format::Zip => rz_archive::zip::list(archive)?,
+        Format::SevenZ => rz_archive::seven_z::list(archive)?,
     };
     let mut names: Vec<String> = entries.iter().map(|e| e.path.to_string()).collect();
     names.sort();
@@ -48,16 +48,16 @@ fn list_names(archive: &Utf8Path, fmt: Format) -> RzResult<Vec<String>> {
 fn compress(archive: &Utf8Path, fmt: Format, inputs: &[Utf8PathBuf]) -> RzResult<()> {
     let opts = default_compress_opts(None);
     match fmt {
-        Format::Tar => rz::tar::compress(inputs, archive, &opts),
-        Format::TarGz => rz::tar_gz::compress(inputs, archive, &opts),
-        Format::TarZst => rz::tar_zst::compress(inputs, archive, &opts),
-        Format::TarXz => rz::tar_xz::compress(inputs, archive, &opts),
+        Format::Tar => rz_archive::tar::compress(inputs, archive, &opts),
+        Format::TarGz => rz_archive::tar_gz::compress(inputs, archive, &opts),
+        Format::TarZst => rz_archive::tar_zst::compress(inputs, archive, &opts),
+        Format::TarXz => rz_archive::tar_xz::compress(inputs, archive, &opts),
         #[cfg(feature = "bzip2")]
-        Format::TarBz2 => rz::tar_bz2::compress(inputs, archive, &opts),
+        Format::TarBz2 => rz_archive::tar_bz2::compress(inputs, archive, &opts),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(rz::error::Error::UnsupportedFormat("tar.bz2".into())),
-        Format::Zip => rz::zip::compress(inputs, archive, &opts),
-        Format::SevenZ => rz::seven_z::compress(inputs, archive, &opts),
+        Format::TarBz2 => Err(rz_archive::error::Error::UnsupportedFormat("tar.bz2".into())),
+        Format::Zip => rz_archive::zip::compress(inputs, archive, &opts),
+        Format::SevenZ => rz_archive::seven_z::compress(inputs, archive, &opts),
     }
 }
 
@@ -70,19 +70,19 @@ fn decompress_with(
     archive: &Utf8Path,
     fmt: Format,
     out: &Utf8Path,
-    opts: &rz::DecompressOpts<'_>,
+    opts: &rz_archive::DecompressOpts<'_>,
 ) -> RzResult<()> {
     match fmt {
-        Format::Tar => rz::tar::decompress(archive, out, opts),
-        Format::TarGz => rz::tar_gz::decompress(archive, out, opts),
-        Format::TarZst => rz::tar_zst::decompress(archive, out, opts),
-        Format::TarXz => rz::tar_xz::decompress(archive, out, opts),
+        Format::Tar => rz_archive::tar::decompress(archive, out, opts),
+        Format::TarGz => rz_archive::tar_gz::decompress(archive, out, opts),
+        Format::TarZst => rz_archive::tar_zst::decompress(archive, out, opts),
+        Format::TarXz => rz_archive::tar_xz::decompress(archive, out, opts),
         #[cfg(feature = "bzip2")]
-        Format::TarBz2 => rz::tar_bz2::decompress(archive, out, opts),
+        Format::TarBz2 => rz_archive::tar_bz2::decompress(archive, out, opts),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(rz::error::Error::UnsupportedFormat("tar.bz2".into())),
-        Format::Zip => rz::zip::decompress(archive, out, opts),
-        Format::SevenZ => rz::seven_z::decompress(archive, out, opts),
+        Format::TarBz2 => Err(rz_archive::error::Error::UnsupportedFormat("tar.bz2".into())),
+        Format::Zip => rz_archive::zip::decompress(archive, out, opts),
+        Format::SevenZ => rz_archive::seven_z::decompress(archive, out, opts),
     }
 }
 
@@ -175,7 +175,7 @@ fn update_skips_unchanged_writes_newer(fmt: Format, ext: &str) -> TestResult {
     // matching standard `tar -x` behavior.
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
-    let dec_opts = rz::DecompressOpts {
+    let dec_opts = rz_archive::DecompressOpts {
         force: true,
         ..default_decompress_opts()
     };
@@ -241,7 +241,7 @@ fn seven_z_append_unsupported() -> TestResult {
 
     let opts = default_compress_opts(None);
     let err = modify::append(&archive, Format::SevenZ, &[a], AppendMode::Append, &opts);
-    assert!(matches!(err, Err(rz::error::Error::ModifyUnsupported { .. })));
+    assert!(matches!(err, Err(rz_archive::error::Error::ModifyUnsupported { .. })));
     Ok(())
 }
 
@@ -253,7 +253,7 @@ fn seven_z_remove_unsupported() -> TestResult {
     compress(&archive, Format::SevenZ, &[a])?;
 
     let err = modify::remove(&archive, Format::SevenZ, &["a.txt".into()], None);
-    assert!(matches!(err, Err(rz::error::Error::ModifyUnsupported { .. })));
+    assert!(matches!(err, Err(rz_archive::error::Error::ModifyUnsupported { .. })));
     Ok(())
 }
 

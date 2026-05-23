@@ -4,15 +4,15 @@ use std::process::ExitCode;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::{CommandFactory, Parser};
 
-use rz::cmd::{Cli, Command, Format, PasswordArgs, SortField};
-use rz::error::{Error, Result};
-use rz::filter;
-use rz::format::{resolve_compress_format, resolve_input_format};
-use rz::progress::{BarProgress, NoProgress, ProgressReport, VerboseReport};
+use rz_archive::cmd::{Cli, Command, Format, PasswordArgs, SortField};
+use rz_archive::error::{Error, Result};
+use rz_archive::filter;
+use rz_archive::format::{resolve_compress_format, resolve_input_format};
+use rz_archive::progress::{BarProgress, NoProgress, ProgressReport, VerboseReport};
 #[cfg(feature = "bzip2")]
-use rz::tar_bz2;
-use rz::modify::{self, AppendMode};
-use rz::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
+use rz_archive::tar_bz2;
+use rz_archive::modify::{self, AppendMode};
+use rz_archive::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
 
 /// Resolve a password from any of the three password-source flags.
 ///

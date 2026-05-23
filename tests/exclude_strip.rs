@@ -4,8 +4,8 @@ use camino::Utf8Path;
 use globset::GlobSet;
 
 use helpers::{TAR_GZ, TestResult, ZIP, build_file_tree, temp_utf8_dir};
-use rz::filter::build_glob_set;
-use rz::{CompressOpts, DecompressOpts};
+use rz_archive::filter::build_glob_set;
+use rz_archive::{CompressOpts, DecompressOpts};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

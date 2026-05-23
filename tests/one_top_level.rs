@@ -1,7 +1,7 @@
 //! End-to-end coverage for `decompress --one-top-level`.
 //!
 //! The directory-derivation logic itself is unit-tested in `format.rs`; this
-//! suite shells out to the compiled `rz` binary to verify the wiring in
+//! suite shells out to the compiled `rz_archive` binary to verify the wiring in
 //! `main.rs` — flag conflicts, the create-directory side effect, and the
 //! stdin rejection path.
 
@@ -11,9 +11,9 @@ use std::process::Command;
 
 use helpers::{TAR_GZ, TestResult, ZIP, build_file_tree, default_compress_opts, temp_utf8_dir};
 
-/// Path to the `rz` binary that Cargo just built for this test crate.
-fn rz_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rz")
+/// Path to the `rz_archive` binary that Cargo just built for this test crate.
+fn rz_archive_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_rz-archive")
 }
 
 #[test]
@@ -27,11 +27,11 @@ fn tar_gz_extracts_into_derived_directory() -> TestResult {
     let archive = tmp.join("payload.tar.gz");
     (TAR_GZ.compress)(&[tree], &archive, &default_compress_opts(None))?;
 
-    let status = Command::new(rz_bin())
+    let status = Command::new(rz_archive_bin())
         .current_dir(tmp.as_std_path())
         .args(["decompress", archive.as_str(), "--one-top-level"])
         .status()?;
-    assert!(status.success(), "rz exited with {status}");
+    assert!(status.success(), "rz_archive exited with {status}");
 
     let derived = tmp.join("payload");
     assert!(derived.is_dir(), "expected derived directory {derived}");
@@ -52,11 +52,11 @@ fn zip_extracts_into_derived_directory() -> TestResult {
     let archive = tmp.join("bundle.zip");
     (ZIP.compress)(&[tree], &archive, &default_compress_opts(None))?;
 
-    let status = Command::new(rz_bin())
+    let status = Command::new(rz_archive_bin())
         .current_dir(tmp.as_std_path())
         .args(["decompress", archive.as_str(), "--one-top-level"])
         .status()?;
-    assert!(status.success(), "rz exited with {status}");
+    assert!(status.success(), "rz_archive exited with {status}");
 
     let derived = tmp.join("bundle");
     assert!(derived.is_dir(), "expected derived directory {derived}");
@@ -75,7 +75,7 @@ fn one_top_level_rejects_stdin_input() -> TestResult {
     (TAR_GZ.compress)(&[tree], &archive, &default_compress_opts(None))?;
 
     let archive_bytes = fs_err::read(&archive)?;
-    let mut child = Command::new(rz_bin())
+    let mut child = Command::new(rz_archive_bin())
         .current_dir(tmp.as_std_path())
         .args(["decompress", "-", "--format", "tar-gz", "--one-top-level"])
         .stdin(std::process::Stdio::piped())
@@ -106,7 +106,7 @@ fn one_top_level_conflicts_with_output_flag() -> TestResult {
     let archive = tmp.join("payload.tar.gz");
     let other = tmp.join("elsewhere");
 
-    let out = Command::new(rz_bin())
+    let out = Command::new(rz_archive_bin())
         .args([
             "decompress",
             archive.as_str(),

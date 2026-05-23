@@ -6,7 +6,7 @@ use camino::Utf8Path;
 use globset::GlobSet;
 use helpers::{TestResult, temp_utf8_dir};
 
-use rz::{CompressOpts, DecompressOpts};
+use rz_archive::{CompressOpts, DecompressOpts};
 
 /// Build a tar archive with two file entries, each given an explicit mtime.
 /// Used by decompress tests to isolate mtime-window behaviour from filesystem
@@ -41,7 +41,7 @@ fn decompress_newer_than_filters_old_entries() -> TestResult {
 
     let mut opts = DecompressOpts::new(false, 0, GlobSet::empty(), GlobSet::empty());
     opts.newer_than = Some(150);
-    rz::tar::decompress(&archive, &out, &opts)?;
+    rz_archive::tar::decompress(&archive, &out, &opts)?;
 
     assert!(!out.join("old.txt").exists(), "old.txt should be filtered");
     assert!(out.join("new.txt").exists(), "new.txt should extract");
@@ -59,7 +59,7 @@ fn decompress_older_than_filters_new_entries() -> TestResult {
 
     let mut opts = DecompressOpts::new(false, 0, GlobSet::empty(), GlobSet::empty());
     opts.older_than = Some(150);
-    rz::tar::decompress(&archive, &out, &opts)?;
+    rz_archive::tar::decompress(&archive, &out, &opts)?;
 
     assert!(out.join("old.txt").exists(), "old.txt should extract");
     assert!(!out.join("new.txt").exists(), "new.txt should be filtered");
@@ -79,7 +79,7 @@ fn decompress_bounds_are_exclusive() -> TestResult {
 
     let mut opts = DecompressOpts::new(false, 0, GlobSet::empty(), GlobSet::empty());
     opts.newer_than = Some(100);
-    rz::tar::decompress(&archive, &out, &opts)?;
+    rz_archive::tar::decompress(&archive, &out, &opts)?;
     assert!(!out.join("old.txt").exists());
     assert!(!out.join("new.txt").exists());
 
@@ -88,7 +88,7 @@ fn decompress_bounds_are_exclusive() -> TestResult {
 
     let mut opts = DecompressOpts::new(false, 0, GlobSet::empty(), GlobSet::empty());
     opts.older_than = Some(100);
-    rz::tar::decompress(&archive, &out, &opts)?;
+    rz_archive::tar::decompress(&archive, &out, &opts)?;
     assert!(!out.join("old.txt").exists());
     assert!(!out.join("new.txt").exists());
     Ok(())
@@ -118,7 +118,7 @@ fn decompress_window_keeps_entries_inside_range() -> TestResult {
     let mut opts = DecompressOpts::new(false, 0, GlobSet::empty(), GlobSet::empty());
     opts.newer_than = Some(150);
     opts.older_than = Some(250);
-    rz::tar::decompress(&archive, &out, &opts)?;
+    rz_archive::tar::decompress(&archive, &out, &opts)?;
 
     assert!(!out.join("a.txt").exists());
     assert!(out.join("b.txt").exists());
@@ -152,10 +152,10 @@ fn compress_newer_than_skips_old_files() -> TestResult {
     let archive = tmp.join("out.tar");
     let mut opts = CompressOpts::new(None, GlobSet::empty());
     opts.newer_than = Some(1_500_000);
-    rz::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
 
     // List the archive and check which files made it in.
-    let entries = rz::tar::list(&archive)?;
+    let entries = rz_archive::tar::list(&archive)?;
     let names: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
     assert!(
         !names.iter().any(|n| n.ends_with("old.txt")),
@@ -191,9 +191,9 @@ fn compress_older_than_skips_new_files() -> TestResult {
     let archive = tmp.join("out.tar");
     let mut opts = CompressOpts::new(None, GlobSet::empty());
     opts.older_than = Some(1_500_000);
-    rz::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
 
-    let entries = rz::tar::list(&archive)?;
+    let entries = rz_archive::tar::list(&archive)?;
     let names: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
     assert!(names.iter().any(|n| n.ends_with("old.txt")));
     assert!(!names.iter().any(|n| n.ends_with("new.txt")));
@@ -203,7 +203,7 @@ fn compress_older_than_skips_new_files() -> TestResult {
 #[test]
 fn cli_parses_date_spellings() -> TestResult {
     // RFC 3339, date-only, and `@unix` must all be accepted by --newer-than.
-    let bin = env!("CARGO_BIN_EXE_rz");
+    let bin = env!("CARGO_BIN_EXE_rz-archive");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -231,7 +231,7 @@ fn cli_parses_date_spellings() -> TestResult {
 
 #[test]
 fn cli_rejects_newer_than_on_zip_compress() -> TestResult {
-    let bin = env!("CARGO_BIN_EXE_rz");
+    let bin = env!("CARGO_BIN_EXE_rz-archive");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -258,7 +258,7 @@ fn cli_rejects_newer_than_on_zip_compress() -> TestResult {
 
 #[test]
 fn cli_rejects_older_than_on_zip_decompress() -> TestResult {
-    let bin = env!("CARGO_BIN_EXE_rz");
+    let bin = env!("CARGO_BIN_EXE_rz-archive");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;

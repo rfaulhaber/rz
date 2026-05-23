@@ -5,8 +5,8 @@ use clap::Parser;
 use globset::GlobSet;
 
 use helpers::{TestResult, assert_trees_match, build_file_tree, temp_utf8_dir};
-use rz::cmd::{Cli, Format};
-use rz::{CompressOpts, DecompressOpts};
+use rz_archive::cmd::{Cli, Format};
+use rz_archive::{CompressOpts, DecompressOpts};
 
 // ── round-trip helpers ────────────────────────────────────────────────────────
 
@@ -20,13 +20,13 @@ fn convert_round_trip(from_ext: &str, to_ext: &str) -> TestResult {
 
     // Build the source archive.
     let src = tmp.join(format!("src{from_ext}"));
-    let fmt_in = rz::cmd::Format::from_path(&src).ok_or("cannot infer from format")?;
+    let fmt_in = rz_archive::cmd::Format::from_path(&src).ok_or("cannot infer from format")?;
     let comp_opts = CompressOpts::new(None, GlobSet::empty());
     dispatch_compress(fmt_in, std::slice::from_ref(&tree), &src, &comp_opts)?;
 
     // Run convert via the library dispatch helpers (same code path as main.rs).
     let dst = tmp.join(format!("dst{to_ext}"));
-    let fmt_out = rz::cmd::Format::from_path(&dst).ok_or("cannot infer to format")?;
+    let fmt_out = rz_archive::cmd::Format::from_path(&dst).ok_or("cannot infer to format")?;
     let dec_opts = DecompressOpts::new(true, 0, GlobSet::empty(), GlobSet::empty());
 
     let tmp2 = tempfile::tempdir()?;
@@ -76,16 +76,16 @@ fn dispatch_compress(
     inputs: &[Utf8PathBuf],
     output: &camino::Utf8Path,
     opts: &CompressOpts<'_>,
-) -> rz::error::Result<()> {
+) -> rz_archive::error::Result<()> {
     match fmt {
-        Format::Zip => rz::zip::compress(inputs, output, opts),
-        Format::Tar => rz::tar::compress(inputs, output, opts),
-        Format::TarGz => rz::tar_gz::compress(inputs, output, opts),
-        Format::TarZst => rz::tar_zst::compress(inputs, output, opts),
-        Format::TarXz => rz::tar_xz::compress(inputs, output, opts),
-        Format::SevenZ => rz::seven_z::compress(inputs, output, opts),
+        Format::Zip => rz_archive::zip::compress(inputs, output, opts),
+        Format::Tar => rz_archive::tar::compress(inputs, output, opts),
+        Format::TarGz => rz_archive::tar_gz::compress(inputs, output, opts),
+        Format::TarZst => rz_archive::tar_zst::compress(inputs, output, opts),
+        Format::TarXz => rz_archive::tar_xz::compress(inputs, output, opts),
+        Format::SevenZ => rz_archive::seven_z::compress(inputs, output, opts),
         #[allow(unreachable_patterns)]
-        _ => Err(rz::error::Error::UnsupportedFormat(fmt.to_string())),
+        _ => Err(rz_archive::error::Error::UnsupportedFormat(fmt.to_string())),
     }
 }
 
@@ -94,16 +94,16 @@ fn dispatch_decompress(
     input: &camino::Utf8Path,
     output: &camino::Utf8Path,
     opts: &DecompressOpts<'_>,
-) -> rz::error::Result<()> {
+) -> rz_archive::error::Result<()> {
     match fmt {
-        Format::Zip => rz::zip::decompress(input, output, opts),
-        Format::Tar => rz::tar::decompress(input, output, opts),
-        Format::TarGz => rz::tar_gz::decompress(input, output, opts),
-        Format::TarZst => rz::tar_zst::decompress(input, output, opts),
-        Format::TarXz => rz::tar_xz::decompress(input, output, opts),
-        Format::SevenZ => rz::seven_z::decompress(input, output, opts),
+        Format::Zip => rz_archive::zip::decompress(input, output, opts),
+        Format::Tar => rz_archive::tar::decompress(input, output, opts),
+        Format::TarGz => rz_archive::tar_gz::decompress(input, output, opts),
+        Format::TarZst => rz_archive::tar_zst::decompress(input, output, opts),
+        Format::TarXz => rz_archive::tar_xz::decompress(input, output, opts),
+        Format::SevenZ => rz_archive::seven_z::decompress(input, output, opts),
         #[allow(unreachable_patterns)]
-        _ => Err(rz::error::Error::UnsupportedFormat(fmt.to_string())),
+        _ => Err(rz_archive::error::Error::UnsupportedFormat(fmt.to_string())),
     }
 }
 
@@ -143,13 +143,13 @@ fn convert_refuses_overwrite_without_force() -> TestResult {
 
     // Create both archives so dst already exists.
     let opts = CompressOpts::new(None, GlobSet::empty());
-    rz::tar_gz::compress(std::slice::from_ref(&tree), &src, &opts)?;
-    rz::tar_zst::compress(std::slice::from_ref(&tree), &dst, &opts)?;
+    rz_archive::tar_gz::compress(std::slice::from_ref(&tree), &src, &opts)?;
+    rz_archive::tar_zst::compress(std::slice::from_ref(&tree), &dst, &opts)?;
 
     // run_convert without force should error with FileExists.
     let result = run_convert_fn(src, Some(dst), None, None, None, false);
     assert!(
-        matches!(result, Err(rz::error::Error::FileExists(_))),
+        matches!(result, Err(rz_archive::error::Error::FileExists(_))),
         "expected FileExists, got {result:?}",
     );
     Ok(())
@@ -166,13 +166,13 @@ fn convert_overwrites_with_force() -> TestResult {
     let dst = tmp.join("dst.tar.zst");
 
     let opts = CompressOpts::new(None, GlobSet::empty());
-    rz::tar_gz::compress(std::slice::from_ref(&tree), &src, &opts)?;
-    rz::tar_zst::compress(std::slice::from_ref(&tree), &dst, &opts)?;
+    rz_archive::tar_gz::compress(std::slice::from_ref(&tree), &src, &opts)?;
+    rz_archive::tar_zst::compress(std::slice::from_ref(&tree), &dst, &opts)?;
 
     run_convert_fn(src, Some(dst.clone()), None, None, None, true)?;
 
     // dst should be a valid tar.zst now.
-    let entries = rz::tar_zst::list(&dst)?;
+    let entries = rz_archive::tar_zst::list(&dst)?;
     assert!(!entries.is_empty(), "converted archive has no entries");
     Ok(())
 }
@@ -185,11 +185,11 @@ fn convert_rejects_same_input_output() -> TestResult {
     build_file_tree(&tree)?;
     let src = tmp.join("src.tar.gz");
     let opts = CompressOpts::new(None, GlobSet::empty());
-    rz::tar_gz::compress(&[tree], &src, &opts)?;
+    rz_archive::tar_gz::compress(&[tree], &src, &opts)?;
 
     let result = run_convert_fn(src.clone(), Some(src), None, None, None, true);
     assert!(
-        matches!(result, Err(rz::error::Error::ConvertSamePath(_))),
+        matches!(result, Err(rz_archive::error::Error::ConvertSamePath(_))),
         "expected ConvertSamePath, got {result:?}",
     );
     Ok(())
@@ -203,7 +203,7 @@ fn convert_derives_output_from_to_flag() -> TestResult {
     build_file_tree(&tree)?;
     let src = tmp.join("src.tar.gz");
     let opts = CompressOpts::new(None, GlobSet::empty());
-    rz::tar_gz::compress(&[tree], &src, &opts)?;
+    rz_archive::tar_gz::compress(&[tree], &src, &opts)?;
 
     // No explicit output — derive from --to.
     run_convert_fn(src, None, None, Some(Format::TarZst), None, false)?;
@@ -219,8 +219,8 @@ fn convert_derives_output_from_to_flag() -> TestResult {
 
 #[test]
 fn cli_convert_parses_to_format() -> TestResult {
-    let cli = Cli::try_parse_from(["rz", "convert", "a.tar.gz", "--to", "tar-zst"])?;
-    if let rz::cmd::Command::Convert { to, .. } = cli.command {
+    let cli = Cli::try_parse_from(["rz_archive", "convert", "a.tar.gz", "--to", "tar-zst"])?;
+    if let rz_archive::cmd::Command::Convert { to, .. } = cli.command {
         assert_eq!(to, Some(Format::TarZst));
     } else {
         return Err("expected Convert subcommand".into());
@@ -231,9 +231,9 @@ fn cli_convert_parses_to_format() -> TestResult {
 #[test]
 fn cli_convert_parses_force_and_level() -> TestResult {
     let cli = Cli::try_parse_from([
-        "rz", "convert", "a.tar.gz", "-o", "b.tar.zst", "-F", "-l", "3",
+        "rz_archive", "convert", "a.tar.gz", "-o", "b.tar.zst", "-F", "-l", "3",
     ])?;
-    if let rz::cmd::Command::Convert {
+    if let rz_archive::cmd::Command::Convert {
         force, level, output, ..
     } = cli.command
     {
@@ -255,8 +255,8 @@ fn run_convert_fn(
     to_format: Option<Format>,
     level: Option<u32>,
     force: bool,
-) -> rz::error::Result<()> {
-    use rz::format::resolve_input_format;
+) -> rz_archive::error::Result<()> {
+    use rz_archive::format::resolve_input_format;
 
     let fmt_in = resolve_input_format(from_format, &input)?;
     let fmt_out = resolve_convert_output_format_test(to_format, output.as_deref(), &input, fmt_in)?;
@@ -267,16 +267,16 @@ fn run_convert_fn(
     };
 
     if !force && fs_err::metadata(&output_path).is_ok() {
-        return Err(rz::error::Error::FileExists(output_path));
+        return Err(rz_archive::error::Error::FileExists(output_path));
     }
 
     if paths_canonically_equal_test(&input, &output_path) {
-        return Err(rz::error::Error::ConvertSamePath(output_path));
+        return Err(rz_archive::error::Error::ConvertSamePath(output_path));
     }
 
     let tmp = tempfile::tempdir()?;
     let tmp_dir = camino::Utf8Path::from_path(tmp.path())
-        .ok_or_else(|| rz::error::Error::InvalidUtf8Path(tmp.path().display().to_string()))?
+        .ok_or_else(|| rz_archive::error::Error::InvalidUtf8Path(tmp.path().display().to_string()))?
         .to_owned();
 
     let dec_opts = DecompressOpts::new(true, 0, GlobSet::empty(), GlobSet::empty());
@@ -287,7 +287,7 @@ fn run_convert_fn(
         let entry = entry?;
         let p = entry.path();
         let utf8 = Utf8PathBuf::try_from(p)
-            .map_err(|e| rz::error::Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+            .map_err(|e| rz_archive::error::Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
         children.push(utf8);
     }
 
@@ -302,7 +302,7 @@ fn resolve_convert_output_format_test(
     output: Option<&camino::Utf8Path>,
     _input: &camino::Utf8Path,
     _fmt_in: Format,
-) -> rz::error::Result<Format> {
+) -> rz_archive::error::Result<Format> {
     if let Some(f) = to_format {
         return Ok(f);
     }
@@ -310,9 +310,9 @@ fn resolve_convert_output_format_test(
         if let Some(f) = Format::from_path(out) {
             return Ok(f);
         }
-        return Err(rz::error::Error::CannotInferFormat(out.to_owned()));
+        return Err(rz_archive::error::Error::CannotInferFormat(out.to_owned()));
     }
-    Err(rz::error::Error::ConvertCannotInferOutputFormat)
+    Err(rz_archive::error::Error::ConvertCannotInferOutputFormat)
 }
 
 fn derive_convert_output_test(

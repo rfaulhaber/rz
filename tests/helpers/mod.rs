@@ -6,7 +6,7 @@ use std::io;
 use camino::{Utf8Path, Utf8PathBuf};
 use globset::GlobSet;
 
-use rz::{CompressOpts, DecompressOpts};
+use rz_archive::{CompressOpts, DecompressOpts};
 
 /// Convenience alias — every integration test returns this.
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -19,10 +19,10 @@ pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// standardised round-trip / list / info tests without duplicating the
 /// boilerplate.
 pub struct FormatHarness {
-    pub compress: fn(&[Utf8PathBuf], &Utf8Path, &CompressOpts<'_>) -> rz::error::Result<()>,
-    pub decompress: fn(&Utf8Path, &Utf8Path, &DecompressOpts<'_>) -> rz::error::Result<()>,
-    pub list: fn(&Utf8Path) -> rz::error::Result<Vec<rz::Entry>>,
-    pub info: fn(&Utf8Path) -> rz::error::Result<rz::ArchiveInfo>,
+    pub compress: fn(&[Utf8PathBuf], &Utf8Path, &CompressOpts<'_>) -> rz_archive::error::Result<()>,
+    pub decompress: fn(&Utf8Path, &Utf8Path, &DecompressOpts<'_>) -> rz_archive::error::Result<()>,
+    pub list: fn(&Utf8Path) -> rz_archive::error::Result<Vec<rz_archive::Entry>>,
+    pub info: fn(&Utf8Path) -> rz_archive::error::Result<rz_archive::ArchiveInfo>,
     pub ext: &'static str,
     pub format_name: &'static str,
     /// tar-style formats preserve the top-level directory name in the archive
@@ -33,50 +33,50 @@ pub struct FormatHarness {
 }
 
 pub const ZIP: FormatHarness = FormatHarness {
-    compress: rz::zip::compress,
-    decompress: rz::zip::decompress,
-    list: rz::zip::list,
-    info: rz::zip::info,
+    compress: rz_archive::zip::compress,
+    decompress: rz_archive::zip::decompress,
+    list: rz_archive::zip::list,
+    info: rz_archive::zip::info,
     ext: ".zip",
     format_name: "zip",
     preserves_top_dir: true,
 };
 
 pub const TAR: FormatHarness = FormatHarness {
-    compress: rz::tar::compress,
-    decompress: rz::tar::decompress,
-    list: rz::tar::list,
-    info: rz::tar::info,
+    compress: rz_archive::tar::compress,
+    decompress: rz_archive::tar::decompress,
+    list: rz_archive::tar::list,
+    info: rz_archive::tar::info,
     ext: ".tar",
     format_name: "tar",
     preserves_top_dir: true,
 };
 
 pub const TAR_GZ: FormatHarness = FormatHarness {
-    compress: rz::tar_gz::compress,
-    decompress: rz::tar_gz::decompress,
-    list: rz::tar_gz::list,
-    info: rz::tar_gz::info,
+    compress: rz_archive::tar_gz::compress,
+    decompress: rz_archive::tar_gz::decompress,
+    list: rz_archive::tar_gz::list,
+    info: rz_archive::tar_gz::info,
     ext: ".tar.gz",
     format_name: "tar.gz",
     preserves_top_dir: true,
 };
 
 pub const TAR_XZ: FormatHarness = FormatHarness {
-    compress: rz::tar_xz::compress,
-    decompress: rz::tar_xz::decompress,
-    list: rz::tar_xz::list,
-    info: rz::tar_xz::info,
+    compress: rz_archive::tar_xz::compress,
+    decompress: rz_archive::tar_xz::decompress,
+    list: rz_archive::tar_xz::list,
+    info: rz_archive::tar_xz::info,
     ext: ".tar.xz",
     format_name: "tar.xz",
     preserves_top_dir: true,
 };
 
 pub const TAR_ZST: FormatHarness = FormatHarness {
-    compress: rz::tar_zst::compress,
-    decompress: rz::tar_zst::decompress,
-    list: rz::tar_zst::list,
-    info: rz::tar_zst::info,
+    compress: rz_archive::tar_zst::compress,
+    decompress: rz_archive::tar_zst::decompress,
+    list: rz_archive::tar_zst::list,
+    info: rz_archive::tar_zst::info,
     ext: ".tar.zst",
     format_name: "tar.zst",
     preserves_top_dir: true,
@@ -84,20 +84,20 @@ pub const TAR_ZST: FormatHarness = FormatHarness {
 
 #[cfg(feature = "bzip2")]
 pub const TAR_BZ2: FormatHarness = FormatHarness {
-    compress: rz::tar_bz2::compress,
-    decompress: rz::tar_bz2::decompress,
-    list: rz::tar_bz2::list,
-    info: rz::tar_bz2::info,
+    compress: rz_archive::tar_bz2::compress,
+    decompress: rz_archive::tar_bz2::decompress,
+    list: rz_archive::tar_bz2::list,
+    info: rz_archive::tar_bz2::info,
     ext: ".tar.bz2",
     format_name: "tar.bz2",
     preserves_top_dir: true,
 };
 
 pub const SEVEN_Z: FormatHarness = FormatHarness {
-    compress: rz::seven_z::compress,
-    decompress: rz::seven_z::decompress,
-    list: rz::seven_z::list,
-    info: rz::seven_z::info,
+    compress: rz_archive::seven_z::compress,
+    decompress: rz_archive::seven_z::decompress,
+    list: rz_archive::seven_z::list,
+    info: rz_archive::seven_z::info,
     ext: ".7z",
     format_name: "7z",
     preserves_top_dir: false,

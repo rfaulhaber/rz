@@ -3,8 +3,8 @@ mod helpers;
 use camino::Utf8PathBuf;
 use globset::GlobSet;
 use helpers::{TAR_GZ, TestResult, temp_utf8_dir};
-use rz::DecompressOpts;
-use rz::cmd::parse_rename;
+use rz_archive::DecompressOpts;
+use rz_archive::cmd::parse_rename;
 
 // ── rename: substring replacement ────────────────────────────────────────────
 

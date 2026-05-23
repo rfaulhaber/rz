@@ -5,7 +5,7 @@ use std::io::BufReader;
 use globset::GlobSet;
 use helpers::{TestResult, temp_utf8_dir};
 
-use rz::CompressOpts;
+use rz_archive::CompressOpts;
 
 fn find_tar_header(
     archive: &camino::Utf8Path,
@@ -34,7 +34,7 @@ fn mode_override_applies_to_file_entries() -> TestResult {
     let archive = tmp.join("out.tar");
     let mut opts = CompressOpts::new(None, GlobSet::empty());
     opts.fixed_mode = Some(0o600);
-    rz::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
 
     let header = find_tar_header(&archive, "a.txt")?;
     assert_eq!(header.mode()? & 0o7777, 0o600);
@@ -55,7 +55,7 @@ fn mtime_owner_group_mode_overrides_combine() -> TestResult {
     opts.fixed_uid = Some(42);
     opts.fixed_gid = Some(43);
     opts.fixed_mode = Some(0o640);
-    rz::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
 
     let header = find_tar_header(&archive, "f.txt")?;
     assert_eq!(header.mtime()?, 1_000_000);
@@ -68,8 +68,8 @@ fn mtime_owner_group_mode_overrides_combine() -> TestResult {
 #[test]
 fn cli_rejects_mode_on_zip() -> TestResult {
     // Exec the binary to exercise the CLI-layer reject path.  If the binary
-    // lives in CARGO_BIN_EXE_rz, cargo's test harness provides the path.
-    let bin = env!("CARGO_BIN_EXE_rz");
+    // lives in CARGO_BIN_EXE_rz-archive, cargo's test harness provides the path.
+    let bin = env!("CARGO_BIN_EXE_rz-archive");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -98,7 +98,7 @@ fn cli_rejects_mode_on_zip() -> TestResult {
 fn cli_accepts_octal_mode_forms() -> TestResult {
     // `644`, `0644`, `0o644` must all parse to the same mode.  Exercised by
     // compressing three times with each spelling and comparing header bits.
-    let bin = env!("CARGO_BIN_EXE_rz");
+    let bin = env!("CARGO_BIN_EXE_rz-archive");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -132,7 +132,7 @@ fn cli_accepts_octal_mode_forms() -> TestResult {
 
 #[test]
 fn cli_rejects_same_owner_on_zip() -> TestResult {
-    let bin = env!("CARGO_BIN_EXE_rz");
+    let bin = env!("CARGO_BIN_EXE_rz-archive");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;

@@ -16,9 +16,11 @@ mod helpers;
 use camino::Utf8PathBuf;
 use globset::GlobSet;
 
-use helpers::{FormatHarness, SEVEN_Z, TAR, TAR_GZ, TAR_XZ, TAR_ZST, TestResult, ZIP, temp_utf8_dir};
-use rz::CompressOpts;
-use rz::error::Error;
+use helpers::{
+    FormatHarness, SEVEN_Z, TAR, TAR_GZ, TAR_XZ, TAR_ZST, TestResult, ZIP, temp_utf8_dir,
+};
+use rz_archive::CompressOpts;
+use rz_archive::error::Error;
 
 #[cfg(feature = "bzip2")]
 use helpers::TAR_BZ2;
@@ -43,7 +45,8 @@ fn missing_input_errors_without_creating_archive(harness: &FormatHarness) -> Tes
         &opts_with_ignore(false),
     );
 
-    let path_match = matches!(&result, Err(Error::CannotReadInput { path, .. }) if path == &missing);
+    let path_match =
+        matches!(&result, Err(Error::CannotReadInput { path, .. }) if path == &missing);
     assert!(
         path_match,
         "{}: expected CannotReadInput for {missing}, got {result:?}",
@@ -106,9 +109,15 @@ fn ignore_failed_read_skips_missing(harness: &FormatHarness) -> TestResult {
     let inputs: Vec<Utf8PathBuf> = vec![missing, good];
     (harness.compress)(&inputs, &archive, &opts_with_ignore(true))?;
 
-    assert!(archive.exists(), "{}: archive should exist", harness.format_name);
+    assert!(
+        archive.exists(),
+        "{}: archive should exist",
+        harness.format_name
+    );
     let entries = (harness.list)(&archive)?;
-    let has_good = entries.iter().any(|e| e.path.as_str().ends_with("good.txt"));
+    let has_good = entries
+        .iter()
+        .any(|e| e.path.as_str().ends_with("good.txt"));
     assert!(
         has_good,
         "{}: archive should contain good.txt; got entries: {:?}",
@@ -221,7 +230,7 @@ fn error_message_does_not_say_symlink_for_regular_directory() -> TestResult {
     let (_guard, tmp) = temp_utf8_dir()?;
     let missing = tmp.join("does-not-exist");
     let archive = tmp.join("out.zip");
-    let result = rz::zip::compress(
+    let result = rz_archive::zip::compress(
         std::slice::from_ref(&missing),
         &archive,
         &opts_with_ignore(false),
@@ -229,7 +238,10 @@ fn error_message_does_not_say_symlink_for_regular_directory() -> TestResult {
     // Render the error message, defaulting to "<ok>" if compress somehow
     // succeeded — the assertions below catch both wording regressions and
     // the missing-error case in one place.
-    let msg = result.err().map(|e| e.to_string()).unwrap_or_else(|| "<ok>".to_owned());
+    let msg = result
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "<ok>".to_owned());
     assert!(
         !msg.contains("symlink"),
         "error wording should not mention 'symlink' for a missing path: {msg}"

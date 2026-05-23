@@ -16,14 +16,6 @@ exclude = [
     "/rust-toolchain.toml"
 ]
 
-[[bin]]
-name = "rz"
-path = "main.rs"
-
-[lib]
-name = "rz"
-path = "lib.rs"
-
 [features]
 xz2 = ["dep:xz2"]
 bzip2 = ["dep:bzip2"]
