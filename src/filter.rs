@@ -675,6 +675,36 @@ pub fn list_tar_entries<R: std::io::Read>(
 
 /// Count entries and sum uncompressed sizes in a tar archive.
 /// Shared by every tar-based `info` function.
+/// A `Read` adapter that tallies every byte pulled through it into a shared
+/// counter.  Wrap it around a *raw* (still-compressed) stream before handing
+/// the stream to a decompressor: the counter then reflects the compressed
+/// byte count — the stdin equivalent of `fs::metadata().len()`, which a pipe
+/// can't answer.
+///
+/// The count lives behind an `Arc<AtomicU64>` so the caller keeps a handle to
+/// it after the reader is swallowed by the decoder→`tar::Archive` ownership
+/// chain (we can't reach back through `into_inner` uniformly across the
+/// different decoder backends).
+pub struct CountingReader<R> {
+    inner: R,
+    count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl<R> CountingReader<R> {
+    pub fn new(inner: R, count: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self { inner, count }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.count
+            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
 pub fn count_tar_entries<R: std::io::Read>(archive: &mut tar::Archive<R>) -> Result<(usize, u64)> {
     let mut entry_count: usize = 0;
     let mut total_uncompressed: u64 = 0;

@@ -171,6 +171,26 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
     })
 }
 
+/// Stream archive metadata from an arbitrary reader (e.g. stdin).
+///
+/// The reader is wrapped in a [`filter::CountingReader`] *before* the zstd
+/// decoder, so `compressed_size` reflects the raw compressed bytes consumed —
+/// the stdin equivalent of stat'ing the file.
+pub fn info_from_reader<R: std::io::Read>(reader: R) -> Result<ArchiveInfo> {
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counting = filter::CountingReader::new(reader, std::sync::Arc::clone(&counter));
+    let decoder = MultiFrameDecoder::new(counting).map_err(std::io::Error::other)?;
+    let mut archive = tar::Archive::new(decoder);
+    let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
+
+    Ok(ArchiveInfo {
+        format: "tar.zst",
+        entry_count,
+        total_uncompressed,
+        compressed_size: counter.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Map an optional user-supplied compression level to a `ruzstd` level.

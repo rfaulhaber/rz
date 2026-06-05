@@ -686,19 +686,48 @@ fn run(cli: Cli) -> Result<()> {
             password_args,
         } => {
             let password = resolve_password(&password_args)?;
-            let fmt = resolve_input_format(format, &input)?;
+            let from_stdin = is_stdio(input.as_str());
+
+            let fmt = if from_stdin {
+                format.ok_or(Error::CannotInferFormatStdin)?
+            } else {
+                resolve_input_format(format, &input)?
+            };
+
+            // zip and 7z need seekable input to read their central directory /
+            // header; a pipe can't provide that.
+            if from_stdin && requires_seek(&fmt) {
+                return Err(Error::StdinNotSupported(fmt.to_string()));
+            }
+
             reject_encryption_for_non_supported(&fmt, &password)?;
-            let info = match fmt {
-                Format::Zip => zip::info(&input)?,
-                Format::Tar => tar::info(&input)?,
-                Format::TarGz => tar_gz::info(&input)?,
-                Format::TarZst => tar_zst::info(&input)?,
-                Format::TarXz => tar_xz::info(&input)?,
-                #[cfg(feature = "bzip2")]
-                Format::TarBz2 => tar_bz2::info(&input)?,
-                Format::SevenZ => seven_z::info(&input)?,
-                #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(other.to_string())),
+
+            let info = if from_stdin {
+                let stdin = std::io::stdin().lock();
+                match fmt {
+                    Format::Tar => tar::info_from_reader(stdin)?,
+                    Format::TarGz => tar_gz::info_from_reader(stdin)?,
+                    Format::TarZst => {
+                        tar_zst::info_from_reader(std::io::BufReader::new(stdin))?
+                    }
+                    Format::TarXz => tar_xz::info_from_reader(stdin)?,
+                    #[cfg(feature = "bzip2")]
+                    Format::TarBz2 => tar_bz2::info_from_reader(stdin)?,
+                    _ => return Err(Error::StdinNotSupported(fmt.to_string())),
+                }
+            } else {
+                match fmt {
+                    Format::Zip => zip::info(&input)?,
+                    Format::Tar => tar::info(&input)?,
+                    Format::TarGz => tar_gz::info(&input)?,
+                    Format::TarZst => tar_zst::info(&input)?,
+                    Format::TarXz => tar_xz::info(&input)?,
+                    #[cfg(feature = "bzip2")]
+                    Format::TarBz2 => tar_bz2::info(&input)?,
+                    Format::SevenZ => seven_z::info(&input)?,
+                    #[allow(unreachable_patterns)]
+                    other => return Err(Error::UnsupportedFormat(other.to_string())),
+                }
             };
 
             let mut stdout = std::io::stdout().lock();

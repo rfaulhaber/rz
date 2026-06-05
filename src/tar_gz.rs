@@ -179,3 +179,23 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
         compressed_size,
     })
 }
+
+/// Stream archive metadata from an arbitrary reader (e.g. stdin).
+///
+/// The reader is wrapped in a [`filter::CountingReader`] *before* the gzip
+/// decoder, so `compressed_size` reflects the raw compressed bytes consumed —
+/// the stdin equivalent of stat'ing the file.
+pub fn info_from_reader<R: std::io::Read>(reader: R) -> Result<ArchiveInfo> {
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counting = filter::CountingReader::new(reader, std::sync::Arc::clone(&counter));
+    let gz = MultiGzDecoder::new(counting);
+    let mut archive = tar::Archive::new(gz);
+    let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
+
+    Ok(ArchiveInfo {
+        format: "tar.gz",
+        entry_count,
+        total_uncompressed,
+        compressed_size: counter.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
