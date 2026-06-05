@@ -21,8 +21,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use globset::GlobSet;
 
-use rz::progress::NoProgress;
-use rz::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
+use rz_archive::progress::NoProgress;
+use rz_archive::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -67,11 +67,15 @@ fn collect_paths(dir: &std::path::Path) -> Vec<Utf8PathBuf> {
 /// Holds the source files and pre-built archives so benchmark iterations don't
 /// pay for setup.
 struct Fixture {
-    /// Source files directory (kept alive via TempDir).
+    /// Source files directory — held purely as an RAII guard (its `Drop`
+    /// removes the temp dir); never read directly.
+    #[allow(dead_code)]
     source_dir: tempfile::TempDir,
     /// Sorted paths to source files.
     sources: Vec<Utf8PathBuf>,
-    /// Directory containing pre-built archives.
+    /// Directory containing pre-built archives — held purely as an RAII guard;
+    /// never read directly.
+    #[allow(dead_code)]
     archive_dir: tempfile::TempDir,
     /// UTF-8 path to archive directory.
     archive_root: Utf8PathBuf,
@@ -112,26 +116,26 @@ impl Fixture {
 struct FormatDesc {
     name: &'static str,
     filename: &'static str,
-    compress: fn(&[Utf8PathBuf], &Utf8Path, &CompressOpts<'_>) -> rz::error::Result<()>,
-    decompress: fn(&Utf8Path, &Utf8Path, &DecompressOpts<'_>) -> rz::error::Result<()>,
-    list: fn(&Utf8Path) -> rz::error::Result<Vec<rz::Entry>>,
-    info: fn(&Utf8Path) -> rz::error::Result<rz::ArchiveInfo>,
-    test: fn(&Utf8Path, &dyn rz::progress::ProgressReport) -> rz::error::Result<()>,
+    compress: fn(&[Utf8PathBuf], &Utf8Path, &CompressOpts<'_>) -> rz_archive::error::Result<()>,
+    decompress: fn(&Utf8Path, &Utf8Path, &DecompressOpts<'_>) -> rz_archive::error::Result<()>,
+    list: fn(&Utf8Path) -> rz_archive::error::Result<Vec<rz_archive::Entry>>,
+    info: fn(&Utf8Path) -> rz_archive::error::Result<rz_archive::ArchiveInfo>,
+    test: fn(&Utf8Path, &dyn rz_archive::progress::ProgressReport) -> rz_archive::error::Result<()>,
 }
 
 /// Wrapper for `zip::test` that drops the password parameter for the benchmark.
 fn zip_test_bench(
     path: &Utf8Path,
-    progress: &dyn rz::progress::ProgressReport,
-) -> rz::error::Result<()> {
+    progress: &dyn rz_archive::progress::ProgressReport,
+) -> rz_archive::error::Result<()> {
     zip::test(path, None, progress)
 }
 
 /// Wrapper for `seven_z::test` that drops the password parameter for the benchmark.
 fn seven_z_test_bench(
     path: &Utf8Path,
-    progress: &dyn rz::progress::ProgressReport,
-) -> rz::error::Result<()> {
+    progress: &dyn rz_archive::progress::ProgressReport,
+) -> rz_archive::error::Result<()> {
     seven_z::test(path, None, progress)
 }
 
