@@ -38,10 +38,17 @@ Format is inferred from file extension or magic bytes (`infer` crate) when not e
 
 Each format module exports public functions with uniform signatures:
 `compress`, `compress_to_writer`, `decompress`, `decompress_from_reader`,
-`decompress_to_writer`, `decompress_reader_to_writer`, `test`, `list`, `info`,
-`info_from_reader`.
-The `_to_writer` / `_from_reader` variants (including `info_from_reader`) enable stdin/stdout
-streaming for tar-based formats; zip and 7z require seekable I/O and reject `-`.
+`decompress_to_writer`, `decompress_reader_to_writer`, `test`, `test_from_reader`,
+`list`, `list_from_reader`, `info`, `info_from_reader`.
+The `_to_writer` / `_from_reader` variants enable stdin/stdout streaming for tar-based
+formats; zip and 7z require seekable I/O and reject `-`.
+
+The read commands (`info`, `list`, `test`, `decompress`) accept stdin uniformly: INPUT is
+optional — omit it or pass `-` to read a pipe — and the format is auto-detected from the
+stream's magic bytes (`Format::from_magic_bytes`), with `--format` as an override. `main.rs`
+centralises this in `resolve_stdin_source()`, which peeks a prefix (`filter::read_prefix`),
+detects the format, then chains the prefix back onto the rest of stdin so the decoder sees
+the whole archive. A terminal/empty stdin yields `Error::NoInput` instead of hanging.
 
 - `src/filter.rs` — exclude/include patterns, path stripping, tar/zip extraction helpers,
   `should_extract()` predicate, `verify_tar_entries()`, `extract_tar_to_writer()`,

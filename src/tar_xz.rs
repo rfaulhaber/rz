@@ -166,6 +166,21 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     filter::list_tar_entries(&mut archive)
 }
 
+/// List entries from an arbitrary reader (e.g. stdin).
+pub fn list_from_reader<R: std::io::Read>(reader: R) -> Result<Vec<Entry>> {
+    let mut archive = archive_from_reader(reader);
+    filter::list_tar_entries(&mut archive)
+}
+
+/// Verify entries from an arbitrary reader (e.g. stdin).
+pub fn test_from_reader<R: std::io::Read>(
+    reader: R,
+    progress: &dyn crate::progress::ProgressReport,
+) -> Result<()> {
+    let mut archive = archive_from_reader(reader);
+    filter::verify_tar_entries(&mut archive, progress)
+}
+
 // ── Info ──────────────────────────────────────────────────────────────────────
 
 pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
@@ -225,6 +240,22 @@ pub fn info_from_reader<R: std::io::Read>(reader: R) -> Result<ArchiveInfo> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Wrap an arbitrary reader in a tar archive with streaming xz decompression.
+/// Mirrors `open_archive` but for an in-hand reader (stdin) rather than a path.
+#[cfg(feature = "xz2")]
+fn archive_from_reader<R: std::io::Read>(
+    reader: R,
+) -> tar::Archive<xz2::read::XzDecoder<BufReader<R>>> {
+    tar::Archive::new(xz2::read::XzDecoder::new(BufReader::new(reader)))
+}
+
+#[cfg(not(feature = "xz2"))]
+fn archive_from_reader<R: std::io::Read>(
+    reader: R,
+) -> tar::Archive<lzma_rust2::XzReader<BufReader<R>>> {
+    tar::Archive::new(lzma_rust2::XzReader::new(BufReader::new(reader), true))
+}
 
 /// Open a `.tar.xz` file and return a tar archive with streaming xz decompression.
 #[cfg(feature = "xz2")]

@@ -121,6 +121,23 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     filter::list_tar_entries(&mut archive)
 }
 
+/// List entries from an arbitrary reader (e.g. stdin).
+pub fn list_from_reader<R: std::io::Read>(reader: R) -> Result<Vec<Entry>> {
+    let bz = BzDecoder::new(reader);
+    let mut archive = tar::Archive::new(bz);
+    filter::list_tar_entries(&mut archive)
+}
+
+/// Verify entries from an arbitrary reader (e.g. stdin).
+pub fn test_from_reader<R: std::io::Read>(
+    reader: R,
+    progress: &dyn crate::progress::ProgressReport,
+) -> Result<()> {
+    let bz = BzDecoder::new(reader);
+    let mut archive = tar::Archive::new(bz);
+    filter::verify_tar_entries(&mut archive, progress)
+}
+
 // ── Info ──────────────────────────────────────────────────────────────────────
 
 pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {

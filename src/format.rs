@@ -77,6 +77,27 @@ impl Format {
         }
     }
 
+    /// Infer format from an in-memory prefix of the archive (magic bytes).
+    ///
+    /// Unlike [`from_magic`], which reads from a path, this works on a byte
+    /// slice already in hand — the stdin case, where we peek a prefix of the
+    /// stream and chain it back. Detecting plain tar needs at least 262 bytes
+    /// (the `ustar` magic sits at offset 257), so a short prefix may return
+    /// `None` even for a valid tar; callers fall back to requiring `--format`.
+    pub fn from_magic_bytes(buf: &[u8]) -> Option<Self> {
+        let kind = infer::get(buf)?;
+        match kind.mime_type() {
+            "application/gzip" => Some(Self::TarGz),
+            "application/zstd" => Some(Self::TarZst),
+            "application/x-xz" => Some(Self::TarXz),
+            "application/x-bzip2" => Some(Self::TarBz2),
+            "application/zip" => Some(Self::Zip),
+            "application/x-7z-compressed" => Some(Self::SevenZ),
+            "application/x-tar" => Some(Self::Tar),
+            _ => None,
+        }
+    }
+
     /// Canonical file extension for this format (including leading dot).
     pub fn extension(&self) -> &'static str {
         match self {
@@ -489,5 +510,35 @@ mod tests {
     #[test]
     fn resolve_input_unknown_extension_errors() {
         assert!(resolve_input_format(None, Utf8Path::new("nonexistent.rar")).is_err());
+    }
+
+    // ── from_magic_bytes ─────────────────────────────────────────────────
+
+    #[test]
+    fn from_magic_bytes_detects_gzip() {
+        // gzip magic: 0x1f 0x8b.
+        assert_eq!(
+            Format::from_magic_bytes(&[0x1f, 0x8b, 0x08, 0x00]),
+            Some(Format::TarGz)
+        );
+    }
+
+    #[test]
+    fn from_magic_bytes_detects_tar() {
+        // `ustar` magic lives at offset 257 in the first tar header block.
+        let mut buf = vec![0u8; 512];
+        buf[257..262].copy_from_slice(b"ustar");
+        assert_eq!(Format::from_magic_bytes(&buf), Some(Format::Tar));
+    }
+
+    #[test]
+    fn from_magic_bytes_short_prefix_returns_none() {
+        // Too short to reach the tar magic offset, no other magic present.
+        assert_eq!(Format::from_magic_bytes(&[0u8; 16]), None);
+    }
+
+    #[test]
+    fn from_magic_bytes_unknown_returns_none() {
+        assert_eq!(Format::from_magic_bytes(b"not an archive at all"), None);
     }
 }

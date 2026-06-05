@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{IsTerminal, Read, Write};
 use std::process::ExitCode;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -150,6 +150,106 @@ fn format_size(bytes: u64, human: bool) -> String {
         value /= 1024.0;
     }
     format!("{value:.1} PiB")
+}
+
+/// Maximum bytes peeked from stdin for magic-byte format detection.
+///
+/// Plain tar's `ustar` magic sits at offset 257, so we need at least 262 bytes
+/// to recognise it; 512 (one tar block) is a safe round figure that also covers
+/// the offset-0 magics (gzip, zstd, xz, bzip2, zip, 7z).
+const STDIN_MAGIC_PREFIX: usize = 512;
+
+/// The reader returned for a stdin archive: the peeked prefix chained ahead of
+/// the unread remainder of the stream, so the format detector and the decoder
+/// both see the whole archive.
+type StdinReader = std::io::Chain<std::io::Cursor<Vec<u8>>, std::io::StdinLock<'static>>;
+
+/// Resolve a stdin archive into its format and a replayable reader.
+///
+/// Peeks a prefix of stdin, determines the format (explicit `--format` wins,
+/// else magic-byte auto-detection), then chains the prefix back onto the rest
+/// of the stream. zip and 7z need seekable input and are rejected here, as is
+/// a terminal/empty stdin (nothing was piped in).
+fn resolve_stdin_source(format: Option<Format>) -> Result<(Format, StdinReader)> {
+    // A terminal stdin means nothing was piped in; reading would block forever.
+    if std::io::stdin().is_terminal() {
+        return Err(Error::NoInput);
+    }
+
+    let mut stdin = std::io::stdin().lock();
+    let prefix = filter::read_prefix(&mut stdin, STDIN_MAGIC_PREFIX)?;
+    if prefix.is_empty() {
+        return Err(Error::NoInput);
+    }
+
+    let fmt = match format {
+        Some(f) => f,
+        None => Format::from_magic_bytes(&prefix).ok_or(Error::CannotInferFormatStdin)?,
+    };
+
+    // zip and 7z need seekable input to read their central directory / header.
+    if requires_seek(&fmt) {
+        return Err(Error::StdinNotSupported(fmt.to_string()));
+    }
+
+    // Re-attach the peeked prefix ahead of the unread remainder of stdin.
+    let reader = std::io::Cursor::new(prefix).chain(stdin);
+    Ok((fmt, reader))
+}
+
+/// Read archive metadata from stdin.
+fn info_from_stdin(
+    format: Option<Format>,
+    password: &Option<String>,
+) -> Result<rz_archive::ArchiveInfo> {
+    let (fmt, reader) = resolve_stdin_source(format)?;
+    reject_encryption_for_non_supported(&fmt, password)?;
+    let info = match fmt {
+        Format::Tar => tar::info_from_reader(reader)?,
+        Format::TarGz => tar_gz::info_from_reader(reader)?,
+        Format::TarZst => tar_zst::info_from_reader(std::io::BufReader::new(reader))?,
+        Format::TarXz => tar_xz::info_from_reader(reader)?,
+        #[cfg(feature = "bzip2")]
+        Format::TarBz2 => tar_bz2::info_from_reader(reader)?,
+        _ => return Err(Error::StdinNotSupported(fmt.to_string())),
+    };
+    Ok(info)
+}
+
+/// List archive entries from stdin.
+fn list_from_stdin(format: Option<Format>, password: &Option<String>) -> Result<Vec<rz_archive::Entry>> {
+    let (fmt, reader) = resolve_stdin_source(format)?;
+    reject_encryption_for_non_supported(&fmt, password)?;
+    let entries = match fmt {
+        Format::Tar => tar::list_from_reader(reader)?,
+        Format::TarGz => tar_gz::list_from_reader(reader)?,
+        Format::TarZst => tar_zst::list_from_reader(std::io::BufReader::new(reader))?,
+        Format::TarXz => tar_xz::list_from_reader(reader)?,
+        #[cfg(feature = "bzip2")]
+        Format::TarBz2 => tar_bz2::list_from_reader(reader)?,
+        _ => return Err(Error::StdinNotSupported(fmt.to_string())),
+    };
+    Ok(entries)
+}
+
+/// Verify archive integrity from stdin.
+fn test_from_stdin(
+    format: Option<Format>,
+    password: &Option<String>,
+    progress: &dyn ProgressReport,
+) -> Result<()> {
+    let (fmt, reader) = resolve_stdin_source(format)?;
+    reject_encryption_for_non_supported(&fmt, password)?;
+    match fmt {
+        Format::Tar => tar::test_from_reader(reader, progress)?,
+        Format::TarGz => tar_gz::test_from_reader(reader, progress)?,
+        Format::TarZst => tar_zst::test_from_reader(std::io::BufReader::new(reader), progress)?,
+        Format::TarXz => tar_xz::test_from_reader(reader, progress)?,
+        #[cfg(feature = "bzip2")]
+        Format::TarBz2 => tar_bz2::test_from_reader(reader, progress)?,
+        _ => return Err(Error::StdinNotSupported(fmt.to_string())),
+    }
+    Ok(())
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -352,17 +452,25 @@ fn run(cli: Cli) -> Result<()> {
             password_args,
         } => {
             let password = resolve_password(&password_args)?;
-            let from_stdin = is_stdio(input.as_str());
+            let from_stdin = input.as_ref().is_none_or(|p| is_stdio(p.as_str()));
 
-            let fmt = if from_stdin {
-                format.ok_or(Error::CannotInferFormatStdin)?
+            // For stdin, peek + detect the format now; the returned reader
+            // carries the rest of the stream through to extraction. The
+            // requires_seek (zip/7z) and terminal/empty-stdin rejections happen
+            // inside resolve_stdin_source.
+            let (fmt, mut stdin_reader) = if from_stdin {
+                let (fmt, reader) = resolve_stdin_source(format)?;
+                (fmt, Some(reader))
             } else {
-                resolve_input_format(format, &input)?
+                let fmt = match input.as_deref() {
+                    Some(p) => resolve_input_format(format, p)?,
+                    None => return Err(Error::NoInput),
+                };
+                (fmt, None)
             };
-
-            if from_stdin && requires_seek(&fmt) {
-                return Err(Error::StdinNotSupported(fmt.to_string()));
-            }
+            // From here on treat input as a concrete path; it is empty and
+            // unused on the stdin path (every use is gated by `from_stdin`).
+            let input = input.unwrap_or_default();
 
             // `--one-top-level` derives a sub-directory from the archive
             // filename (`foo.tar.gz` → `foo/`).  Stdin has no filename, so
@@ -389,18 +497,35 @@ fn run(cli: Cli) -> Result<()> {
             };
 
             // Dry-run: list what would be extracted and exit.
-            if dry_run && !from_stdin {
-                let entries = match fmt {
-                    Format::Zip => zip::list(&input)?,
-                    Format::Tar => tar::list(&input)?,
-                    Format::TarGz => tar_gz::list(&input)?,
-                    Format::TarZst => tar_zst::list(&input)?,
-                    Format::TarXz => tar_xz::list(&input)?,
-                    #[cfg(feature = "bzip2")]
-                    Format::TarBz2 => tar_bz2::list(&input)?,
-                    Format::SevenZ => seven_z::list(&input)?,
-                    #[allow(unreachable_patterns)]
-                    other => return Err(Error::UnsupportedFormat(other.to_string())),
+            if dry_run {
+                let entries = if from_stdin {
+                    // Consume the peeked reader to list; dry-run never extracts,
+                    // so spending the stream here is fine.
+                    let reader = stdin_reader.take().ok_or(Error::NoInput)?;
+                    match fmt {
+                        Format::Tar => tar::list_from_reader(reader)?,
+                        Format::TarGz => tar_gz::list_from_reader(reader)?,
+                        Format::TarZst => {
+                            tar_zst::list_from_reader(std::io::BufReader::new(reader))?
+                        }
+                        Format::TarXz => tar_xz::list_from_reader(reader)?,
+                        #[cfg(feature = "bzip2")]
+                        Format::TarBz2 => tar_bz2::list_from_reader(reader)?,
+                        _ => return Err(Error::StdinNotSupported(fmt.to_string())),
+                    }
+                } else {
+                    match fmt {
+                        Format::Zip => zip::list(&input)?,
+                        Format::Tar => tar::list(&input)?,
+                        Format::TarGz => tar_gz::list(&input)?,
+                        Format::TarZst => tar_zst::list(&input)?,
+                        Format::TarXz => tar_xz::list(&input)?,
+                        #[cfg(feature = "bzip2")]
+                        Format::TarBz2 => tar_bz2::list(&input)?,
+                        Format::SevenZ => seven_z::list(&input)?,
+                        #[allow(unreachable_patterns)]
+                        other => return Err(Error::UnsupportedFormat(other.to_string())),
+                    }
                 };
                 let mut stdout = std::io::stdout().lock();
                 for entry in &entries {
@@ -492,23 +617,23 @@ fn run(cli: Cli) -> Result<()> {
             if to_stdout {
                 let mut stdout = std::io::stdout().lock();
                 if from_stdin {
-                    let stdin = std::io::stdin().lock();
+                    let reader = stdin_reader.take().ok_or(Error::NoInput)?;
                     match fmt {
-                        Format::Tar => tar::decompress_reader_to_writer(stdin, &mut stdout, &opts)?,
+                        Format::Tar => tar::decompress_reader_to_writer(reader, &mut stdout, &opts)?,
                         Format::TarGz => {
-                            tar_gz::decompress_reader_to_writer(stdin, &mut stdout, &opts)?
+                            tar_gz::decompress_reader_to_writer(reader, &mut stdout, &opts)?
                         }
                         Format::TarZst => tar_zst::decompress_reader_to_writer(
-                            std::io::BufReader::new(stdin),
+                            std::io::BufReader::new(reader),
                             &mut stdout,
                             &opts,
                         )?,
                         Format::TarXz => {
-                            tar_xz::decompress_reader_to_writer(stdin, &mut stdout, &opts)?
+                            tar_xz::decompress_reader_to_writer(reader, &mut stdout, &opts)?
                         }
                         #[cfg(feature = "bzip2")]
                         Format::TarBz2 => {
-                            tar_bz2::decompress_reader_to_writer(stdin, &mut stdout, &opts)?
+                            tar_bz2::decompress_reader_to_writer(reader, &mut stdout, &opts)?
                         }
                         _ => return Err(Error::StdinNotSupported(fmt.to_string())),
                     }
@@ -534,18 +659,18 @@ fn run(cli: Cli) -> Result<()> {
                 }
             } else if from_stdin {
                 let output = output.unwrap_or_else(|| ".".into());
-                let stdin = std::io::stdin().lock();
+                let reader = stdin_reader.take().ok_or(Error::NoInput)?;
                 match fmt {
-                    Format::Tar => tar::decompress_from_reader(stdin, &output, &opts)?,
-                    Format::TarGz => tar_gz::decompress_from_reader(stdin, &output, &opts)?,
+                    Format::Tar => tar::decompress_from_reader(reader, &output, &opts)?,
+                    Format::TarGz => tar_gz::decompress_from_reader(reader, &output, &opts)?,
                     Format::TarZst => tar_zst::decompress_from_reader(
-                        std::io::BufReader::new(stdin),
+                        std::io::BufReader::new(reader),
                         &output,
                         &opts,
                     )?,
-                    Format::TarXz => tar_xz::decompress_from_reader(stdin, &output, &opts)?,
+                    Format::TarXz => tar_xz::decompress_from_reader(reader, &output, &opts)?,
                     #[cfg(feature = "bzip2")]
-                    Format::TarBz2 => tar_bz2::decompress_from_reader(stdin, &output, &opts)?,
+                    Format::TarBz2 => tar_bz2::decompress_from_reader(reader, &output, &opts)?,
                     _ => return Err(Error::StdinNotSupported(fmt.to_string())),
                 }
             } else {
@@ -586,19 +711,26 @@ fn run(cli: Cli) -> Result<()> {
             password_args,
         } => {
             let password = resolve_password(&password_args)?;
-            let fmt = resolve_input_format(format, &input)?;
-            reject_encryption_for_non_supported(&fmt, &password)?;
-            let mut entries = match fmt {
-                Format::Zip => zip::list(&input)?,
-                Format::Tar => tar::list(&input)?,
-                Format::TarGz => tar_gz::list(&input)?,
-                Format::TarZst => tar_zst::list(&input)?,
-                Format::TarXz => tar_xz::list(&input)?,
-                #[cfg(feature = "bzip2")]
-                Format::TarBz2 => tar_bz2::list(&input)?,
-                Format::SevenZ => seven_z::list(&input)?,
-                #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(other.to_string())),
+            let from_stdin = input.as_ref().is_none_or(|p| is_stdio(p.as_str()));
+
+            let mut entries = if from_stdin {
+                list_from_stdin(format, &password)?
+            } else {
+                let input = input.unwrap_or_default();
+                let fmt = resolve_input_format(format, &input)?;
+                reject_encryption_for_non_supported(&fmt, &password)?;
+                match fmt {
+                    Format::Zip => zip::list(&input)?,
+                    Format::Tar => tar::list(&input)?,
+                    Format::TarGz => tar_gz::list(&input)?,
+                    Format::TarZst => tar_zst::list(&input)?,
+                    Format::TarXz => tar_xz::list(&input)?,
+                    #[cfg(feature = "bzip2")]
+                    Format::TarBz2 => tar_bz2::list(&input)?,
+                    Format::SevenZ => seven_z::list(&input)?,
+                    #[allow(unreachable_patterns)]
+                    other => return Err(Error::UnsupportedFormat(other.to_string())),
+                }
             };
 
             let excludes = filter::build_excludes(exclude, &exclude_from)?;
@@ -644,13 +776,16 @@ fn run(cli: Cli) -> Result<()> {
             password_args,
         } => {
             let password = resolve_password(&password_args)?;
-            let fmt = resolve_input_format(format, &input)?;
-            reject_encryption_for_non_supported(&fmt, &password)?;
-            let base_progress: Box<dyn ProgressReport> = if cli.progress {
-                let file_size = fs_err::metadata(&input)?.len();
-                Box::new(BarProgress::bytes(file_size))
-            } else {
-                Box::new(NoProgress)
+            let from_stdin = input.as_ref().is_none_or(|p| is_stdio(p.as_str()));
+
+            // A file gives us a byte total for a real progress bar; stdin can't
+            // be sized ahead of time, so it falls back to a spinner.
+            let base_progress: Box<dyn ProgressReport> = match input.as_ref() {
+                Some(p) if cli.progress && !from_stdin => {
+                    Box::new(BarProgress::bytes(fs_err::metadata(p)?.len()))
+                }
+                _ if cli.progress => Box::new(BarProgress::spinner()),
+                _ => Box::new(NoProgress),
             };
             let verbose_progress;
             let progress: &dyn ProgressReport = if cli.verbose {
@@ -659,17 +794,24 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 &*base_progress
             };
-            match fmt {
-                Format::Zip => zip::test(&input, password.as_deref(), progress)?,
-                Format::Tar => tar::test(&input, progress)?,
-                Format::TarGz => tar_gz::test(&input, progress)?,
-                Format::TarZst => tar_zst::test(&input, progress)?,
-                Format::TarXz => tar_xz::test(&input, progress)?,
-                #[cfg(feature = "bzip2")]
-                Format::TarBz2 => tar_bz2::test(&input, progress)?,
-                Format::SevenZ => seven_z::test(&input, password.as_deref(), progress)?,
-                #[allow(unreachable_patterns)]
-                other => return Err(Error::UnsupportedFormat(other.to_string())),
+            if from_stdin {
+                test_from_stdin(format, &password, progress)?;
+            } else {
+                let input = input.unwrap_or_default();
+                let fmt = resolve_input_format(format, &input)?;
+                reject_encryption_for_non_supported(&fmt, &password)?;
+                match fmt {
+                    Format::Zip => zip::test(&input, password.as_deref(), progress)?,
+                    Format::Tar => tar::test(&input, progress)?,
+                    Format::TarGz => tar_gz::test(&input, progress)?,
+                    Format::TarZst => tar_zst::test(&input, progress)?,
+                    Format::TarXz => tar_xz::test(&input, progress)?,
+                    #[cfg(feature = "bzip2")]
+                    Format::TarBz2 => tar_bz2::test(&input, progress)?,
+                    Format::SevenZ => seven_z::test(&input, password.as_deref(), progress)?,
+                    #[allow(unreachable_patterns)]
+                    other => return Err(Error::UnsupportedFormat(other.to_string())),
+                }
             }
             progress.finish();
             if !cli.quiet {
@@ -686,36 +828,17 @@ fn run(cli: Cli) -> Result<()> {
             password_args,
         } => {
             let password = resolve_password(&password_args)?;
-            let from_stdin = is_stdio(input.as_str());
-
-            let fmt = if from_stdin {
-                format.ok_or(Error::CannotInferFormatStdin)?
-            } else {
-                resolve_input_format(format, &input)?
-            };
-
-            // zip and 7z need seekable input to read their central directory /
-            // header; a pipe can't provide that.
-            if from_stdin && requires_seek(&fmt) {
-                return Err(Error::StdinNotSupported(fmt.to_string()));
-            }
-
-            reject_encryption_for_non_supported(&fmt, &password)?;
+            // Stdin when no path is given or it's the `-` sentinel.
+            let from_stdin = input.as_ref().is_none_or(|p| is_stdio(p.as_str()));
 
             let info = if from_stdin {
-                let stdin = std::io::stdin().lock();
-                match fmt {
-                    Format::Tar => tar::info_from_reader(stdin)?,
-                    Format::TarGz => tar_gz::info_from_reader(stdin)?,
-                    Format::TarZst => {
-                        tar_zst::info_from_reader(std::io::BufReader::new(stdin))?
-                    }
-                    Format::TarXz => tar_xz::info_from_reader(stdin)?,
-                    #[cfg(feature = "bzip2")]
-                    Format::TarBz2 => tar_bz2::info_from_reader(stdin)?,
-                    _ => return Err(Error::StdinNotSupported(fmt.to_string())),
-                }
+                info_from_stdin(format, &password)?
             } else {
+                // Safe: `from_stdin` is false only when `input` is `Some` and
+                // not `-`.
+                let input = input.unwrap_or_default();
+                let fmt = resolve_input_format(format, &input)?;
+                reject_encryption_for_non_supported(&fmt, &password)?;
                 match fmt {
                     Format::Zip => zip::info(&input)?,
                     Format::Tar => tar::info(&input)?,

@@ -675,6 +675,25 @@ pub fn list_tar_entries<R: std::io::Read>(
 
 /// Count entries and sum uncompressed sizes in a tar archive.
 /// Shared by every tar-based `info` function.
+/// Read up to `max` bytes from `reader` into a fresh buffer, returning however
+/// many were available (a short read or immediate EOF yields fewer).
+///
+/// Used to peek the leading bytes of a stream for magic-byte format detection
+/// before chaining the prefix back onto the rest of the stream.
+pub fn read_prefix<R: std::io::Read>(reader: &mut R, max: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; max];
+    let mut filled = 0;
+    while filled < max {
+        let n = reader.read(&mut buf[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
 /// A `Read` adapter that tallies every byte pulled through it into a shared
 /// counter.  Wrap it around a *raw* (still-compressed) stream before handing
 /// the stream to a decompressor: the counter then reflects the compressed

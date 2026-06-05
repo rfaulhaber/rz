@@ -153,10 +153,14 @@ pub enum Command {
     },
 
     /// Decompress an archive
+    ///
+    /// Reads from stdin when INPUT is omitted or `-` (format auto-detected from
+    /// the stream; pass `--format` to override). zip and 7z need seekable input
+    /// and cannot be read from stdin.
     #[command(alias = "d")]
     Decompress {
-        /// Input archive
-        input: Utf8PathBuf,
+        /// Input archive (omit or use `-` to read from stdin)
+        input: Option<Utf8PathBuf>,
 
         /// Output directory (default: current dir)
         #[arg(short, long)]
@@ -258,9 +262,14 @@ pub enum Command {
     },
 
     /// List archive contents
+    ///
+    /// Reads from stdin when INPUT is omitted or `-` (format auto-detected from
+    /// the stream; pass `--format` to override). zip and 7z need seekable input
+    /// and cannot be read from stdin.
     #[command(alias = "ls")]
     List {
-        input: Utf8PathBuf,
+        /// Input archive (omit or use `-` to read from stdin)
+        input: Option<Utf8PathBuf>,
 
         #[arg(short, long)]
         format: Option<Format>,
@@ -295,9 +304,14 @@ pub enum Command {
     },
 
     /// Test archive integrity (fully decompress without writing to disk)
+    ///
+    /// Reads from stdin when INPUT is omitted or `-` (format auto-detected from
+    /// the stream; pass `--format` to override). zip and 7z need seekable input
+    /// and cannot be read from stdin.
     #[command(alias = "t")]
     Test {
-        input: Utf8PathBuf,
+        /// Input archive (omit or use `-` to read from stdin)
+        input: Option<Utf8PathBuf>,
 
         #[arg(short, long)]
         format: Option<Format>,
@@ -308,8 +322,14 @@ pub enum Command {
     },
 
     /// Show archive metadata
+    ///
+    /// Reads from stdin when INPUT is omitted or `-`. The format is
+    /// auto-detected from the stream's magic bytes; pass `--format` to override
+    /// (required only for streams that can't be sniffed). zip and 7z need
+    /// seekable input and cannot be read from stdin.
     Info {
-        input: Utf8PathBuf,
+        /// Input archive (omit or use `-` to read from stdin)
+        input: Option<Utf8PathBuf>,
 
         #[arg(short, long)]
         format: Option<Format>,
