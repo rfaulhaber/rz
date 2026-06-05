@@ -5,6 +5,11 @@ edition = "2024"
 license = "GPL-3.0-only"
 description = "Multi-format archive tool — tar, zip, 7z with a unified CLI"
 repository = "https://codeberg.org/ryf/rz"
+
+[[bin]]
+path = "src/main.rs"
+name = "rz"
+
 include = [
     "/src",
     "/README.md",
