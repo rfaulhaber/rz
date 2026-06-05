@@ -23,11 +23,12 @@ nix develop                    # enter dev shell (rust toolchain + rust-analyzer
 
 ## Architecture
 
-Flat layout — no `src/` directory. Source files live at the repo root.
+Standard Cargo layout — source files live under `src/`. The package is named
+`rz-archive` (library crate `rz_archive`, binary `rz-archive`).
 
-- `main.rs` — binary entry point, parses CLI args
-- `lib.rs` — library root, re-exports modules
-- `cmd.rs` — CLI definition (clap derive): `Cli`, `Command` enum, `Format` enum
+- `src/main.rs` — binary entry point, parses CLI args, dispatches each subcommand
+- `src/lib.rs` — library root, re-exports modules, defines `Entry` / `ArchiveInfo` / opts structs
+- `src/cmd.rs` — CLI definition (clap derive): `Cli`, `Command` enum, `Format` enum
 
 The `Format` enum defines supported archive formats: Zip, Tar, TarGz, TarZst, TarXz, TarBz2,
 SevenZ. Compression algorithms (gzip, zstd, xz, bzip2) are used as layers inside tar pipelines,
@@ -35,14 +36,17 @@ not exposed as standalone formats.
 
 Format is inferred from file extension or magic bytes (`infer` crate) when not explicitly specified.
 
-Each format module exports up to six public functions with uniform signatures:
+Each format module exports public functions with uniform signatures:
 `compress`, `compress_to_writer`, `decompress`, `decompress_from_reader`,
-`decompress_to_writer`, `decompress_reader_to_writer`, `test`, `list`, `info`.
-The `_to_writer` / `_from_reader` variants enable stdin/stdout streaming for tar-based formats.
+`decompress_to_writer`, `decompress_reader_to_writer`, `test`, `list`, `info`,
+`info_from_reader`.
+The `_to_writer` / `_from_reader` variants (including `info_from_reader`) enable stdin/stdout
+streaming for tar-based formats; zip and 7z require seekable I/O and reject `-`.
 
-- `filter.rs` — exclude/include patterns, path stripping, tar/zip extraction helpers,
-  `should_extract()` predicate, `verify_tar_entries()`, `extract_tar_to_writer()`
-- `progress.rs` — `ProgressReport` trait, `BarProgress`, `NoProgress`, `VerboseReport` decorator
+- `src/filter.rs` — exclude/include patterns, path stripping, tar/zip extraction helpers,
+  `should_extract()` predicate, `verify_tar_entries()`, `extract_tar_to_writer()`,
+  `count_tar_entries()`, `CountingReader` (byte-tally adapter used by `info_from_reader`)
+- `src/progress.rs` — `ProgressReport` trait, `BarProgress`, `NoProgress`, `VerboseReport` decorator
 
 ## Enforced Conventions (clippy + clippy.toml)
 
