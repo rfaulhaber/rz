@@ -68,8 +68,8 @@ fn mtime_owner_group_mode_overrides_combine() -> TestResult {
 #[test]
 fn cli_rejects_mode_on_zip() -> TestResult {
     // Exec the binary to exercise the CLI-layer reject path.  If the binary
-    // lives in CARGO_BIN_EXE_rz-archive, cargo's test harness provides the path.
-    let bin = env!("CARGO_BIN_EXE_rz-archive");
+    // lives in CARGO_BIN_EXE_rz, cargo's test harness provides the path.
+    let bin = env!("CARGO_BIN_EXE_rz");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -98,7 +98,7 @@ fn cli_rejects_mode_on_zip() -> TestResult {
 fn cli_accepts_octal_mode_forms() -> TestResult {
     // `644`, `0644`, `0o644` must all parse to the same mode.  Exercised by
     // compressing three times with each spelling and comparing header bits.
-    let bin = env!("CARGO_BIN_EXE_rz-archive");
+    let bin = env!("CARGO_BIN_EXE_rz");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -132,7 +132,7 @@ fn cli_accepts_octal_mode_forms() -> TestResult {
 
 #[test]
 fn cli_rejects_same_owner_on_zip() -> TestResult {
-    let bin = env!("CARGO_BIN_EXE_rz-archive");
+    let bin = env!("CARGO_BIN_EXE_rz");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;

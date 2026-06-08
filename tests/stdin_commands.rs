@@ -14,7 +14,7 @@ use helpers::{
 };
 
 fn rz_archive_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rz-archive")
+    env!("CARGO_BIN_EXE_rz")
 }
 
 /// Run `rz_archive` with `args`, feeding `stdin_bytes`, and capture output.

@@ -15,7 +15,7 @@ use helpers::{TAR_GZ, TestResult, ZIP, build_file_tree, default_compress_opts, t
 
 /// Path to the `rz_archive` binary that Cargo just built for this test crate.
 fn rz_archive_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_rz-archive")
+    env!("CARGO_BIN_EXE_rz")
 }
 
 /// Run `rz_archive` with `args`, feeding `stdin_bytes` on stdin, and capture

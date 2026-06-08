@@ -203,7 +203,7 @@ fn compress_older_than_skips_new_files() -> TestResult {
 #[test]
 fn cli_parses_date_spellings() -> TestResult {
     // RFC 3339, date-only, and `@unix` must all be accepted by --newer-than.
-    let bin = env!("CARGO_BIN_EXE_rz-archive");
+    let bin = env!("CARGO_BIN_EXE_rz");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -231,7 +231,7 @@ fn cli_parses_date_spellings() -> TestResult {
 
 #[test]
 fn cli_rejects_newer_than_on_zip_compress() -> TestResult {
-    let bin = env!("CARGO_BIN_EXE_rz-archive");
+    let bin = env!("CARGO_BIN_EXE_rz");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
@@ -258,7 +258,7 @@ fn cli_rejects_newer_than_on_zip_compress() -> TestResult {
 
 #[test]
 fn cli_rejects_older_than_on_zip_decompress() -> TestResult {
-    let bin = env!("CARGO_BIN_EXE_rz-archive");
+    let bin = env!("CARGO_BIN_EXE_rz");
     let (_guard, tmp) = temp_utf8_dir()?;
     let file = tmp.join("x.txt");
     fs_err::write(&file, b"x")?;
