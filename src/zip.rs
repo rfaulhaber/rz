@@ -11,6 +11,29 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
+/// Apply the on-disk Unix permission bits from `meta` to a zip `FileOptions`
+/// so the mode — notably the executable bit — round-trips through the archive
+/// instead of falling back to the crate's default `0o644`.  A no-op on non-Unix
+/// platforms, where the crate default is kept.
+///
+/// Not used for symlink entries: the `zip` crate sets their mode (`S_IFLNK`)
+/// itself, and overriding it would break symlink round-tripping.
+pub(crate) fn with_unix_mode<'k>(
+    options: zip::write::FileOptions<'k, ()>,
+    meta: &std::fs::Metadata,
+) -> zip::write::FileOptions<'k, ()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        options.unix_permissions(meta.permissions().mode())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        options
+    }
+}
+
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
 
@@ -37,12 +60,12 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
                 write_symlink_entry(&mut zip, input, name, options, opts)?;
             } else if meta.is_dir() {
                 if opts.no_recursion {
-                    zip.add_directory(format!("{name}/"), options)?;
+                    zip.add_directory(format!("{name}/"), with_unix_mode(options, &meta))?;
                 } else {
                     add_dir_walked(&mut zip, input, name, options, opts)?;
                 }
             } else {
-                zip.start_file(name, options)?;
+                zip.start_file(name, with_unix_mode(options, &meta))?;
                 let mut f = fs_err::File::open(input)?;
                 let size = io::copy(&mut f, &mut zip)?;
                 opts.progress.set_entry(name);
@@ -57,12 +80,12 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
                 write_symlink_entry(&mut zip, input, name, base_options, opts)?;
             } else if meta.is_dir() {
                 if opts.no_recursion {
-                    zip.add_directory(format!("{name}/"), base_options)?;
+                    zip.add_directory(format!("{name}/"), with_unix_mode(base_options, &meta))?;
                 } else {
                     add_dir_walked(&mut zip, input, name, base_options, opts)?;
                 }
             } else {
-                zip.start_file(name, base_options)?;
+                zip.start_file(name, with_unix_mode(base_options, &meta))?;
                 let mut f = fs_err::File::open(input)?;
                 let size = io::copy(&mut f, &mut zip)?;
                 opts.progress.set_entry(name);
@@ -86,21 +109,29 @@ fn add_dir_walked<'k>(
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     filter::walk_dir(dir, prefix, opts, &mut |entry| {
-        let is_symlink = !opts.follow_symlinks
-            && fs_err::symlink_metadata(&entry.fs_path)?
-                .file_type()
-                .is_symlink();
+        let link_meta = fs_err::symlink_metadata(&entry.fs_path)?;
+        let is_symlink = !opts.follow_symlinks && link_meta.file_type().is_symlink();
 
         if is_symlink {
             write_symlink_entry(zip, &entry.fs_path, &entry.archive_name, options, opts)?;
-        } else if entry.is_dir {
-            zip.add_directory(format!("{}/", entry.archive_name), options)?;
         } else {
-            zip.start_file(&entry.archive_name, options)?;
-            let mut f = fs_err::File::open(&entry.fs_path)?;
-            let size = io::copy(&mut f, zip)?;
-            opts.progress.set_entry(&entry.archive_name);
-            opts.progress.inc(size);
+            // Store the mode of the object actually being archived — the target
+            // when following a symlink, the entry itself otherwise.
+            let meta = if opts.follow_symlinks && link_meta.file_type().is_symlink() {
+                filter::input_metadata(&entry.fs_path, true)?
+            } else {
+                link_meta
+            };
+            let entry_options = with_unix_mode(options, &meta);
+            if entry.is_dir {
+                zip.add_directory(format!("{}/", entry.archive_name), entry_options)?;
+            } else {
+                zip.start_file(&entry.archive_name, entry_options)?;
+                let mut f = fs_err::File::open(&entry.fs_path)?;
+                let size = io::copy(&mut f, zip)?;
+                opts.progress.set_entry(&entry.archive_name);
+                opts.progress.inc(size);
+            }
         }
         Ok(())
     })

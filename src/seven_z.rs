@@ -1,5 +1,5 @@
 use camino::{Utf8Path, Utf8PathBuf};
-use sevenz_rust2::encoder_options::AesEncoderOptions;
+use sevenz_rust2::encoder_options::{AesEncoderOptions, Lzma2Options};
 use sevenz_rust2::{EncoderConfiguration, EncoderMethod, Password};
 
 use crate::error::{Error, Result};
@@ -32,19 +32,27 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
 
     let mut writer = sevenz_rust2::ArchiveWriter::create(output)?;
 
-    // When a password is set, configure AES-256 as the outermost layer on top
-    // of LZMA2.  The method vec order mirrors the 7z encoder pipeline: each
-    // element wraps the output of the previous one, so AES (index 0) is the
-    // innermost encoder as written but the OUTERMOST layer in the archive
-    // (i.e. the first thing a reader must peel off).
-    //
-    // The sevenz-rust2 test suite uses [AesEncoderOptions, Lzma2Options] for
-    // encrypted archives, which matches the canonical 7z tool's pipeline order.
+    // Resolve the compression method from the requested level: 0 (or `--store`,
+    // which main.rs maps to level 0) selects COPY (no compression); 1..=9 map to
+    // LZMA2 presets (higher values are clamped to 9 by lzma-rust2); None keeps
+    // sevenz-rust2's default LZMA2.
+    let comp_cfg: Option<EncoderConfiguration> = match opts.level {
+        Some(0) => Some(EncoderConfiguration::new(EncoderMethod::COPY)),
+        Some(level) => Some(Lzma2Options::from_level(level).into()),
+        None => None,
+    };
+
+    // The method vec mirrors the 7z encoder pipeline: each element wraps the
+    // output of the previous one, so AES at index 0 is the OUTERMOST layer in
+    // the archive (the first thing a reader must peel off), wrapping the
+    // compression method beneath it.
     if let Some(pwd) = &opts.password {
         let aes_cfg: EncoderConfiguration =
             AesEncoderOptions::new(Password::from(pwd.as_str())).into();
-        let lzma2_cfg = EncoderConfiguration::new(EncoderMethod::LZMA2);
-        writer.set_content_methods(vec![aes_cfg, lzma2_cfg]);
+        let comp_cfg = comp_cfg.unwrap_or_else(|| EncoderConfiguration::new(EncoderMethod::LZMA2));
+        writer.set_content_methods(vec![aes_cfg, comp_cfg]);
+    } else if let Some(comp_cfg) = comp_cfg {
+        writer.set_content_methods(vec![comp_cfg]);
     }
 
     for input in &inputs {

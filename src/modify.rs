@@ -857,7 +857,7 @@ fn zip_append(
         if meta.is_dir() {
             zip_add_dir(&mut zw, input, name, options, opts, archive_idx.as_ref())?;
         } else if should_add_zip_entry(name, &meta, archive_idx.as_ref()) {
-            zw.start_file(name, options)?;
+            zw.start_file(name, crate::zip::with_unix_mode(options, &meta))?;
             let mut f = fs_err::File::open(input)?;
             let size = std::io::copy(&mut f, &mut zw)?;
             opts.progress.set_entry(name);
@@ -896,7 +896,7 @@ fn zip_add_dir(
         if !should_add_zip_entry(&entry.archive_name, &meta, archive_idx) {
             return Ok(());
         }
-        zw.start_file(&entry.archive_name, options)?;
+        zw.start_file(&entry.archive_name, crate::zip::with_unix_mode(options, &meta))?;
         let mut f = fs_err::File::open(&entry.fs_path)?;
         let size = std::io::copy(&mut f, zw)?;
         opts.progress.set_entry(&entry.archive_name);
