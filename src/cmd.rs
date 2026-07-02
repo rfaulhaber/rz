@@ -250,7 +250,7 @@ pub enum Command {
         rename: Vec<(String, String)>,
 
         /// Prepend a path prefix to every extracted entry
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", value_parser = parse_prefix)]
         prefix: Option<Utf8PathBuf>,
 
         /// Extract only these specific paths from the archive
@@ -615,6 +615,29 @@ mod tests {
     fn threads_after_subcommand_parses() -> TestResult {
         let cli = Cli::try_parse_from(["rz", "compress", "--threads", "2", "."])?;
         assert_eq!(cli.threads, Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn prefix_rejects_parent_traversal_at_parse_time() {
+        let res = Cli::try_parse_from(["rz", "decompress", "a.tar", "--prefix", "../escape"]);
+        assert!(res.is_err(), "--prefix with `..` must be rejected during parsing");
+    }
+
+    #[test]
+    fn prefix_rejects_absolute_at_parse_time() {
+        let res = Cli::try_parse_from(["rz", "decompress", "a.tar", "--prefix", "/abs"]);
+        assert!(res.is_err(), "an absolute --prefix must be rejected during parsing");
+    }
+
+    #[test]
+    fn prefix_accepts_relative() -> TestResult {
+        let cli = Cli::try_parse_from(["rz", "decompress", "a.tar", "--prefix", "restore/v2"])?;
+        if let Command::Decompress { prefix, .. } = cli.command {
+            assert_eq!(prefix, Some(Utf8PathBuf::from("restore/v2")));
+        } else {
+            return Err("expected Decompress subcommand".into());
+        }
         Ok(())
     }
 }

@@ -68,6 +68,12 @@ pub fn compress_to_writer<W: std::io::Write>(
 /// Splits input into independently-compressed frames and writes them
 /// sequentially. Concatenated zstd frames are valid — decoders transparently
 /// join them.
+///
+/// The `ruzstd` encoder writes to its drain with `.unwrap()` internally, so we
+/// always compress into an in-memory buffer (writing to a `Vec` is infallible)
+/// and then write that buffer to `writer` ourselves — otherwise a write error
+/// on the real output (ENOSPC, a closed pipe) would panic instead of returning
+/// a clean `io::Error`.
 fn parallel_zst_compress<W: io::Write>(
     data: &[u8],
     writer: &mut W,
@@ -77,7 +83,9 @@ fn parallel_zst_compress<W: io::Write>(
     // Concatenated frames are fine, but a single frame with no intermediate
     // Vec<Vec<u8>> and no thread-pool setup is strictly cheaper.
     if data.len() <= PARALLEL_BLOCK_SIZE {
-        ruzstd::encoding::compress(Cursor::new(data), writer, level);
+        let mut buf = Vec::new();
+        ruzstd::encoding::compress(Cursor::new(data), &mut buf, level);
+        writer.write_all(&buf)?;
         return Ok(());
     }
 
@@ -299,11 +307,36 @@ impl<R: io::Read> io::Read for MultiFrameDecoder<R> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{self, Cursor, Read};
+    use std::io::{self, Cursor, Read, Write};
 
     use ruzstd::encoding::{CompressionLevel, compress};
 
-    use super::MultiFrameDecoder;
+    use super::{MultiFrameDecoder, parallel_zst_compress};
+
+    /// A writer that fails every write — stands in for a full disk or a closed
+    /// pipe.  `ruzstd` writes to its drain with `.unwrap()`, so if we passed
+    /// this straight to it the compress would panic; the production code routes
+    /// ruzstd's output through an in-memory buffer so the error surfaces here.
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+    }
+
+    #[test]
+    fn single_frame_compress_propagates_write_error() {
+        // Small payload → single-frame path (the one that used to hand the real
+        // writer to ruzstd).  A write error must come back as Err, not a panic.
+        let data = b"payload".repeat(100);
+        let mut writer = FailingWriter;
+        let result = parallel_zst_compress(&data, &mut writer, CompressionLevel::Fastest);
+        assert!(result.is_err(), "write error must propagate as Err, not panic");
+    }
 
     /// Compress `data` as a single zstd frame using the same encoder the
     /// production code uses for each parallel block.

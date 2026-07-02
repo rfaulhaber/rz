@@ -566,7 +566,14 @@ impl EncoderHandle for ZstHandle {
         let b = self.builder.take().ok_or_else(builder_taken_err)?;
         let tar_data = b.into_inner()?;
         let mut out = self.out.take().ok_or_else(builder_taken_err)?;
-        ruzstd::encoding::compress(std::io::Cursor::new(&tar_data), &mut out, self.level);
+        // Compress into a buffer first: `ruzstd` writes to its drain with
+        // `.unwrap()`, so writing straight to `out` would panic on a real I/O
+        // error (ENOSPC etc.) instead of propagating it.  Writing to a `Vec` is
+        // infallible; the fallible write to the file happens here where `?` can
+        // catch it.
+        let mut compressed = Vec::new();
+        ruzstd::encoding::compress(std::io::Cursor::new(&tar_data), &mut compressed, self.level);
+        out.write_all(&compressed)?;
         let file = out.into_inner().map_err(std::io::Error::other)?;
         file.sync_all()?;
         Ok(())

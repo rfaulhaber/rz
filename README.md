@@ -308,10 +308,12 @@ streams in both directions; bzip2 is unavailable.
 - **Stdin/stdout streaming**: Only tar-based formats support `-` for
   stdin/stdout. ZIP and 7z require seekable I/O and will error.
 - **Symlinks**: tar-family and zip store symlinks as links by default; pass
-  `-H` / `--follow-symlinks` to archive the target's content instead. The zip
-  extractor in `rz` does not yet recreate stored links on disk (they extract
-  as text files containing the target path); tar does. 7z follows symlinks
-  unconditionally on compress — a limitation of the `sevenz-rust2` backend.
+  `-H` / `--follow-symlinks` to archive the target's content instead. On Unix,
+  both the tar and zip extractors recreate stored links as real symlinks,
+  rejecting any link whose target is absolute or escapes the output directory;
+  on non-Unix platforms zip symlinks extract as text files containing the
+  target path. 7z follows symlinks unconditionally on compress — a limitation
+  of the `sevenz-rust2` backend.
 - **Zip list -l**: Per-entry sizes and permissions are not shown for zip archives
   in long-listing mode. The upstream `zip` crate does not expose central
   directory metadata without seeking to each entry's local file header, which
