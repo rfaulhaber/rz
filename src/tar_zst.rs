@@ -236,7 +236,11 @@ fn open_decoder(input: &Utf8Path) -> Result<MultiFrameDecoder<BufReader<fs_err::
 /// compression produces multiple frames, this wrapper detects frame boundaries
 /// via `into_inner()` and re-initialises a new decoder for each subsequent
 /// frame.
-struct MultiFrameDecoder<R: io::Read> {
+///
+/// Exposed to the crate so the `modify` read-rewrite path can decode the same
+/// multi-frame archives this module produces — a single-frame decoder there
+/// would silently truncate any archive larger than one block.
+pub(crate) struct MultiFrameDecoder<R: io::Read> {
     state: DecoderState<R>,
 }
 
@@ -249,7 +253,7 @@ enum DecoderState<R: io::Read> {
 }
 
 impl<R: io::Read> MultiFrameDecoder<R> {
-    fn new(source: R) -> io::Result<Self> {
+    pub(crate) fn new(source: R) -> io::Result<Self> {
         let decoder = ruzstd::decoding::StreamingDecoder::new(source).map_err(io::Error::other)?;
         Ok(Self {
             state: DecoderState::Active(Box::new(decoder)),

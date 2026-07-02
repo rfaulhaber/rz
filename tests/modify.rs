@@ -26,6 +26,31 @@ fn write_file(dir: &Utf8Path, name: &str, body: &[u8]) -> std::io::Result<Utf8Pa
     Ok(p)
 }
 
+/// Create `dir` and fill it with `n` files of `size` bytes each, with
+/// deterministic non-trivial content.  Used to build a tar payload larger than
+/// `tar_zst`'s 1 MiB frame size so the archive is genuinely multi-frame.
+fn build_large_tree(dir: &Utf8Path, n: usize, size: usize) -> std::io::Result<()> {
+    fs_err::create_dir_all(dir)?;
+    for i in 0..n {
+        let content: Vec<u8> = (0..size)
+            .map(|b| (b.wrapping_mul(31).wrapping_add(i.wrapping_mul(7)) % 256) as u8)
+            .collect();
+        fs_err::write(dir.join(format!("f{i:03}.dat")), &content)?;
+    }
+    Ok(())
+}
+
+/// Count zstd frame-magic (`28 B5 2F FD`) occurrences in a file — a lower-bound
+/// proxy for how many independent frames the compressor emitted.  Used only to
+/// assert a fixture actually exercises the multi-frame path.
+fn zstd_frame_count(path: &Utf8Path) -> std::io::Result<usize> {
+    let bytes = fs_err::read(path)?;
+    Ok(bytes
+        .windows(4)
+        .filter(|w| *w == [0x28, 0xB5, 0x2F, 0xFD])
+        .count())
+}
+
 /// Sorted list of every entry name in `archive`, dispatched by format.
 fn list_names(archive: &Utf8Path, fmt: Format) -> RzResult<Vec<String>> {
     let entries = match fmt {
@@ -216,6 +241,74 @@ fn remove_drops_matching(fmt: Format, ext: &str) -> TestResult {
 #[test] fn tar_zst_append_then_list() -> TestResult { append_then_list(Format::TarZst, ".tar.zst") }
 #[test] fn tar_zst_append_then_decompress() -> TestResult { append_then_decompress(Format::TarZst, ".tar.zst", true) }
 #[test] fn tar_zst_remove_drops_matching() -> TestResult { remove_drops_matching(Format::TarZst, ".tar.zst") }
+
+// Regression: `tar_zst::compress` emits one independent zstd frame per 1 MiB of
+// tar payload, and the modify read-rewrite must decode *all* of them.  A
+// single-frame decoder (the historical bug) stopped at the first frame and
+// silently truncated the archive to ~1 MiB during append/remove.  Both tests
+// deliberately build a >1 MiB (multi-frame) archive.
+
+#[test]
+fn tar_zst_multiframe_append_preserves_all_entries() -> TestResult {
+    let (_g, tmp) = temp_utf8_dir()?;
+    let tree = tmp.join("tree");
+    build_large_tree(&tree, 4, 512 * 1024)?; // ~2 MiB uncompressed tar
+    let archive = tmp.join("big.tar.zst");
+    compress(&archive, Format::TarZst, std::slice::from_ref(&tree))?;
+    assert!(
+        zstd_frame_count(&archive)? >= 2,
+        "fixture must be multi-frame to exercise the bug; enlarge the tree",
+    );
+
+    let b = write_file(&tmp, "b.txt", b"appended\n")?;
+    let opts = default_compress_opts(None);
+    modify::append(&archive, Format::TarZst, std::slice::from_ref(&b), AppendMode::Append, &opts)?;
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    decompress(&archive, Format::TarZst, &out)?;
+
+    // Every original file must survive the rewrite with byte-identical content,
+    // plus the newly appended entry.
+    helpers::assert_trees_match(&tree, &out.join("tree"))?;
+    assert_eq!(fs_err::read(out.join("b.txt"))?, b"appended\n");
+    Ok(())
+}
+
+#[test]
+fn tar_zst_multiframe_remove_preserves_survivors() -> TestResult {
+    let (_g, tmp) = temp_utf8_dir()?;
+    let tree = tmp.join("tree");
+    build_large_tree(&tree, 4, 512 * 1024)?; // ~2 MiB uncompressed tar
+    let archive = tmp.join("big.tar.zst");
+    compress(&archive, Format::TarZst, std::slice::from_ref(&tree))?;
+    assert!(
+        zstd_frame_count(&archive)? >= 2,
+        "fixture must be multi-frame to exercise the bug; enlarge the tree",
+    );
+
+    modify::remove(&archive, Format::TarZst, &["f000.dat".into()], None)?;
+
+    let names = list_names(&archive, Format::TarZst)?;
+    assert!(!names.iter().any(|n| n.ends_with("f000.dat")), "f000.dat should be gone: {names:?}");
+    for i in 1..4 {
+        let want = format!("f{i:03}.dat");
+        assert!(names.iter().any(|n| n.ends_with(&want)), "missing {want}: {names:?}");
+    }
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    decompress(&archive, Format::TarZst, &out)?;
+    for i in 1..4 {
+        let name = format!("f{i:03}.dat");
+        assert_eq!(
+            fs_err::read(out.join("tree").join(&name))?,
+            fs_err::read(tree.join(&name))?,
+            "content mismatch for {name} after remove",
+        );
+    }
+    Ok(())
+}
 
 #[test] fn tar_xz_append_then_list() -> TestResult { append_then_list(Format::TarXz, ".tar.xz") }
 #[test] fn tar_xz_append_then_decompress() -> TestResult { append_then_decompress(Format::TarXz, ".tar.xz", true) }

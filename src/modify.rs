@@ -341,11 +341,11 @@ fn open_tar_reader(archive: &Utf8Path, fmt: Format) -> Result<Box<dyn Read>> {
     match fmt {
         Format::Tar => Ok(Box::new(buf)),
         Format::TarGz => Ok(Box::new(flate2::read::MultiGzDecoder::new(buf))),
-        Format::TarZst => {
-            let dec =
-                ruzstd::decoding::StreamingDecoder::new(buf).map_err(std::io::Error::other)?;
-            Ok(Box::new(dec))
-        }
+        // Must use the multi-frame decoder: `tar_zst::compress` emits one
+        // independent zstd frame per 1 MiB chunk, so a single-frame decoder
+        // here would stop at the first frame and silently truncate the archive
+        // during the read-rewrite.
+        Format::TarZst => Ok(Box::new(crate::tar_zst::MultiFrameDecoder::new(buf)?)),
         Format::TarXz => xz_read(buf),
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => Ok(Box::new(bzip2::read::BzDecoder::new(buf))),

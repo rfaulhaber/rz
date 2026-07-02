@@ -216,6 +216,55 @@ fn zip_overwrites_existing_symlink_on_force() -> TestResult {
 }
 
 #[test]
+fn zip_rejects_parent_dir_symlink_target() -> TestResult {
+    // A zip containing a symlink whose target climbs out of the extraction root
+    // — the classic packaging for a symlink-based zip-slip.  rz can't produce
+    // such an archive itself, so we hand-build one with the `zip` crate.
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let archive = tmp.join("evil.zip");
+    {
+        let file = fs_err::File::create(&archive)?;
+        let mut zw = ::zip::ZipWriter::new(file);
+        let opts = ::zip::write::SimpleFileOptions::default();
+        zw.add_symlink("evil", "../../../../tmp/rz_zip_escape", opts)?;
+        zw.finish()?;
+    }
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    let res = rz_archive::zip::decompress(&archive, &out, &decompress_opts());
+    assert!(
+        res.is_err(),
+        "extraction should reject ..-containing symlink target"
+    );
+    Ok(())
+}
+
+#[test]
+fn zip_rejects_absolute_symlink_target() -> TestResult {
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let archive = tmp.join("evil.zip");
+    {
+        let file = fs_err::File::create(&archive)?;
+        let mut zw = ::zip::ZipWriter::new(file);
+        let opts = ::zip::write::SimpleFileOptions::default();
+        zw.add_symlink("evil", "/tmp/rz_zip_escape", opts)?;
+        zw.finish()?;
+    }
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    let res = rz_archive::zip::decompress(&archive, &out, &decompress_opts());
+    assert!(
+        res.is_err(),
+        "extraction should reject absolute symlink target"
+    );
+    Ok(())
+}
+
+#[test]
 fn zip_top_level_symlink_is_preserved() -> TestResult {
     let (_guard, tmp) = temp_utf8_dir()?;
 

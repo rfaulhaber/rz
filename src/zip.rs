@@ -136,10 +136,10 @@ fn write_symlink_entry<'k>(
 /// mirroring what typical Windows unzip tools do when they encounter a POSIX
 /// symlink entry they can't materialise.
 ///
-/// Rejects absolute targets as a minimal guard against obvious symlink-based
-/// archive-escape attempts.  Does not attempt deeper validation (the broader
-/// problem of later entries crossing through a freshly-created symlink into
-/// territory outside the output root is out of scope here).
+/// Rejects absolute targets and any `..` component via
+/// [`filter::safe_link_target`] — the same guard the tar path uses — so a later
+/// entry cannot be written *through* a freshly-created symlink into territory
+/// outside the output root (the classic symlink-based zip-slip).
 ///
 /// When `existed` is true, any existing path at `out_path` is removed first,
 /// because `symlink(2)` fails if the target already exists.
@@ -154,11 +154,7 @@ fn extract_symlink_entry(
     let target = std::str::from_utf8(&target_bytes)
         .map_err(|_| Error::InvalidUtf8Path(dest_path.to_string()))?;
 
-    if Utf8Path::new(target).is_absolute() {
-        return Err(Error::PathTraversal(format!(
-            "symlink {dest_path} -> {target}"
-        )));
-    }
+    filter::safe_link_target(dest_path.as_str(), target)?;
 
     if existed {
         fs_err::remove_file(out_path)?;
