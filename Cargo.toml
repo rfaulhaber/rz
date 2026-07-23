@@ -4,7 +4,7 @@ version = "0.14.3"
 edition = "2024"
 license = "GPL-3.0-only"
 description = "Multi-format archive tool — tar, zip, 7z with a unified CLI"
-repository = "https://codeberg.org/ryf/rz"
+repository = "https://github.com/rfaulhaber/rz"
 
 [[bin]]
 path = "src/main.rs"

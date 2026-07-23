@@ -81,43 +81,16 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ env.ASSET }}
 
-  upload-codeberg:
+  release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
-      - name: Upload to Codeberg release
-        env:
-          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
-          CODEBERG_REPO: ${{ vars.CODEBERG_REPO }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          # Fetch existing release, or create one if it doesn't exist yet
-          RELEASE=$(curl -sf \
-            -H "Authorization: token $CODEBERG_TOKEN" \
-            "https://codeberg.org/api/v1/repos/$CODEBERG_REPO/releases/tags/$TAG" 2>/dev/null) || true
-
-          RELEASE_ID=$(echo "$RELEASE" | jq -r '.id // empty')
-
-          if [ -z "$RELEASE_ID" ]; then
-            echo "No release found for $TAG — creating one on Codeberg..."
-            RELEASE=$(curl -sf -X POST \
-              -H "Authorization: token $CODEBERG_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"tag_name\": \"$TAG\", \"name\": \"$TAG\", \"draft\": false}" \
-              "https://codeberg.org/api/v1/repos/$CODEBERG_REPO/releases")
-            RELEASE_ID=$(echo "$RELEASE" | jq -r '.id')
-          fi
-
-          echo "Uploading assets to Codeberg release $RELEASE_ID..."
-          for file in rz-*; do
-            echo "  $file"
-            curl -sf -X POST \
-              -H "Authorization: token $CODEBERG_TOKEN" \
-              -F "attachment=@$file" \
-              "https://codeberg.org/api/v1/repos/$CODEBERG_REPO/releases/$RELEASE_ID/assets?name=$(basename "$file")"
-          done
-          echo "Done."
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: rz-*

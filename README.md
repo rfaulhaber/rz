@@ -51,7 +51,7 @@ nix run . -- compress mydir -o mydir.tar.gz
 
 ### Prebuilt binaries
 
-Download from the [releases page](https://codeberg.org/ryf/rz/releases).
+Download from the [releases page](https://github.com/rfaulhaber/rz/releases).
 Binaries are provided for Linux (x86_64, aarch64), macOS (x86_64, aarch64),
 and Windows (x86_64).
 
