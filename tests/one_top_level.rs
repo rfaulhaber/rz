@@ -127,3 +127,40 @@ fn one_top_level_conflicts_with_output_flag() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn missing_archive_leaves_no_derived_directory_behind() -> TestResult {
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let out = Command::new(rz_archive_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["decompress", "missing.tar.gz", "--one-top-level"])
+        .output()?;
+    assert!(!out.status.success(), "missing archive must fail");
+    assert!(
+        !tmp.join("missing").exists(),
+        "a failed run must not leave an empty missing/ directory behind",
+    );
+    Ok(())
+}
+
+#[test]
+fn dry_run_does_not_create_derived_directory() -> TestResult {
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let tree = tmp.join("tree");
+    build_file_tree(&tree)?;
+    let archive = tmp.join("payload.tar.gz");
+    (TAR_GZ.compress)(&[tree], &archive, &default_compress_opts(None))?;
+
+    let out = Command::new(rz_archive_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["decompress", archive.as_str(), "--one-top-level", "-n"])
+        .output()?;
+    assert!(out.status.success(), "dry-run failed");
+    assert!(
+        !tmp.join("payload").exists(),
+        "a dry-run must not touch the disk",
+    );
+    Ok(())
+}

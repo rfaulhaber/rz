@@ -192,7 +192,7 @@ pub enum Command {
         no_directory: bool,
 
         /// Write extracted file contents to stdout instead of disk
-        #[arg(short = 'O', long)]
+        #[arg(short = 'O', long, conflicts_with = "output")]
         to_stdout: bool,
 
         /// Strip N leading path components during extraction
@@ -616,6 +616,15 @@ mod tests {
         let cli = Cli::try_parse_from(["rz", "compress", "--threads", "2", "."])?;
         assert_eq!(cli.threads, Some(2));
         Ok(())
+    }
+
+    #[test]
+    fn to_stdout_conflicts_with_output() {
+        let res = Cli::try_parse_from(["rz", "decompress", "a.tar", "-O", "-o", "outdir"]);
+        assert!(
+            res.is_err(),
+            "-O silently ignoring -o hid the fact that outdir stays empty"
+        );
     }
 
     #[test]

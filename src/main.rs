@@ -492,16 +492,13 @@ fn run(cli: Cli) -> Result<()> {
             // `--one-top-level` derives a sub-directory from the archive
             // filename (`foo.tar.gz` → `foo/`).  Stdin has no filename, so
             // we can't derive anything — bail with a clear error rather
-            // than silently treating "-" as the stem.  Tar-family extraction
-            // expects its output directory to already exist, so we create
-            // it ourselves here.
+            // than silently treating "-" as the stem.  The directory itself
+            // is created further down, after the dry-run early return.
             let output = if one_top_level {
                 if from_stdin {
                     return Err(Error::OneTopLevelStdin);
                 }
-                let derived = fmt.derive_output_dir(&input);
-                fs_err::create_dir_all(&derived)?;
-                Some(derived)
+                Some(fmt.derive_output_dir(&input))
             } else {
                 output
             };
@@ -555,6 +552,18 @@ fn run(cli: Cli) -> Result<()> {
                     }
                 }
                 return Ok(());
+            }
+
+            // Tar-family extraction expects its output directory to already
+            // exist, so create the --one-top-level dir here — after the
+            // dry-run early return (a preview must not touch the disk), and
+            // only once the input archive is known to exist, so a failed run
+            // doesn't leave an empty directory behind.
+            if one_top_level {
+                fs_err::metadata(&input)?;
+                if let Some(ref dir) = output {
+                    fs_err::create_dir_all(dir)?;
+                }
             }
 
             let base_progress: Box<dyn ProgressReport> = if cli.progress && !from_stdin {
