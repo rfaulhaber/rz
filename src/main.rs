@@ -548,7 +548,11 @@ fn run(cli: Cli) -> Result<()> {
                     }
                     if let Some(stripped) = filter::strip_components(&entry.path, strip_components)
                     {
-                        let _ = writeln!(stdout, "{stripped}");
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            rz_archive::progress::escape_entry_name(stripped.as_str())
+                        );
                     }
                 }
                 return Ok(());
@@ -784,16 +788,20 @@ fn run(cli: Cli) -> Result<()> {
                 let _ = writeln!(stdout);
             } else {
                 for entry in &filtered {
+                    // Entry names come straight from archive metadata —
+                    // defang control characters before they reach the
+                    // terminal (see progress::escape_entry_name).
+                    let name = rz_archive::progress::escape_entry_name(entry.path.as_str());
                     if long {
                         let kind = if entry.is_dir { "d" } else { "-" };
                         let size_str = format_size(entry.size, human_readable);
                         let _ = writeln!(
                             stdout,
-                            "{kind}{:06o}  {:>10}  {}",
-                            entry.mode, size_str, entry.path,
+                            "{kind}{:06o}  {:>10}  {name}",
+                            entry.mode, size_str,
                         );
                     } else {
-                        let _ = writeln!(stdout, "{}", entry.path);
+                        let _ = writeln!(stdout, "{name}");
                     }
                 }
             }
