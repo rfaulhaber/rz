@@ -1108,6 +1108,22 @@ fn paths_canonically_equal(a: &Utf8Path, b: &Utf8Path) -> bool {
     }
 }
 
+/// Dispatch list to the correct format module.
+fn dispatch_list(fmt: Format, input: &Utf8Path) -> Result<Vec<rz_archive::Entry>> {
+    match fmt {
+        Format::Zip => zip::list(input),
+        Format::Tar => tar::list(input),
+        Format::TarGz => tar_gz::list(input),
+        Format::TarZst => tar_zst::list(input),
+        Format::TarXz => tar_xz::list(input),
+        #[cfg(feature = "bzip2")]
+        Format::TarBz2 => tar_bz2::list(input),
+        Format::SevenZ => seven_z::list(input),
+        #[allow(unreachable_patterns)]
+        other => Err(Error::UnsupportedFormat(other.to_string())),
+    }
+}
+
 /// Dispatch decompress to the correct format module.
 fn dispatch_decompress(
     fmt: Format,
@@ -1184,13 +1200,28 @@ fn run_convert(
         .ok_or_else(|| Error::InvalidUtf8Path(tmp.path().display().to_string()))?
         .to_owned();
 
-    let dec_opts = DecompressOpts::new(
-        true,
-        0,
-        globset::GlobSet::empty(),
-        globset::GlobSet::empty(),
-    );
+    // Convert is a fidelity-preserving re-encode, not a user-facing extract:
+    // the tempdir is the only carrier for entry metadata, so anything not
+    // preserved here is silently lost from the output archive.  Hence
+    // preserve_permissions — DecompressOpts::new hardcodes it off, which
+    // stripped the executable bit from every zip entry on the way through.
+    let dec_opts = DecompressOpts {
+        preserve_permissions: true,
+        ..DecompressOpts::new(
+            true,
+            0,
+            globset::GlobSet::empty(),
+            globset::GlobSet::empty(),
+        )
+    };
     dispatch_decompress(fmt_in, &input, &tmp_dir, &dec_opts)?;
+
+    // Same story for mtimes: tar restores file mtimes but nothing restores
+    // directory mtimes (writing the children bumps them again), and zip
+    // extraction restores no mtimes at all — so entries of a supposedly
+    // format-only conversion got stamped with the conversion time.  Re-apply
+    // what the source archive itself records.
+    restore_entry_mtimes(&tmp_dir, &dispatch_list(fmt_in, &input)?)?;
 
     // Compress from the children of tmp_dir so the archive entries are named
     // after the original archive's top-level entries, not the tempdir itself.
@@ -1206,6 +1237,32 @@ fn run_convert(
     let comp_opts = CompressOpts::new(level, globset::GlobSet::empty());
     dispatch_compress(fmt_out, &children, &output_path, &comp_opts)?;
 
+    Ok(())
+}
+
+/// Stamp source-archive mtimes onto the extracted tempdir tree.
+///
+/// Entries with mtime 0 (unrecorded — 7z listings, or genuinely epoch-stamped
+/// reproducible archives, which the extractor already restored) are skipped,
+/// as are entries missing on disk.  Symlinks get `set_symlink_file_times` so
+/// the link itself is stamped, not its target.  Setting a child's mtime does
+/// not touch its parent directory's, so ordering is irrelevant here.
+fn restore_entry_mtimes(tmp_dir: &Utf8Path, entries: &[rz_archive::Entry]) -> Result<()> {
+    for entry in entries {
+        if entry.mtime == 0 {
+            continue;
+        }
+        let path = tmp_dir.join(entry.path.as_str().trim_end_matches('/'));
+        let Ok(meta) = fs_err::symlink_metadata(&path) else {
+            continue;
+        };
+        let ft = filetime::FileTime::from_unix_time(entry.mtime as i64, 0);
+        if meta.file_type().is_symlink() {
+            let _ = filetime::set_symlink_file_times(path.as_std_path(), ft, ft);
+        } else {
+            filetime::set_file_times(path.as_std_path(), ft, ft)?;
+        }
+    }
     Ok(())
 }
 

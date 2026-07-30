@@ -12,10 +12,11 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
-/// Apply the on-disk Unix permission bits from `meta` to a zip `FileOptions`
-/// so the mode — notably the executable bit — round-trips through the archive
-/// instead of falling back to the crate's default `0o644`.  A no-op on non-Unix
-/// platforms, where the crate default is kept.
+/// Apply source-file metadata from `meta` to a zip `FileOptions`: the Unix
+/// permission bits (notably the executable bit) on Unix, and the modification
+/// time everywhere — the crate's default stamps the moment of compression,
+/// which discards the source mtime entirely.  Timestamps outside the DOS
+/// datetime range (pre-1980) keep the crate default.
 ///
 /// Not used for symlink entries: the `zip` crate sets their mode (`S_IFLNK`)
 /// itself, and overriding it would break symlink round-tripping.
@@ -23,6 +24,10 @@ pub(crate) fn with_unix_mode<'k>(
     options: zip::write::FileOptions<'k, ()>,
     meta: &std::fs::Metadata,
 ) -> zip::write::FileOptions<'k, ()> {
+    let options = match zip_datetime_from_meta(meta) {
+        Some(dt) => options.last_modified_time(dt),
+        None => options,
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -30,9 +35,30 @@ pub(crate) fn with_unix_mode<'k>(
     }
     #[cfg(not(unix))]
     {
-        let _ = meta;
         options
     }
+}
+
+/// Convert a filesystem mtime into a zip `DateTime` (UTC components, the
+/// inverse of [`zip_datetime_to_epoch`]).  `None` when the metadata carries no
+/// usable time or it falls outside the representable 1980–2107 DOS range.
+fn zip_datetime_from_meta(meta: &std::fs::Metadata) -> Option<zip::DateTime> {
+    let secs = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let odt = time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).ok()?).ok()?;
+    zip::DateTime::from_date_and_time(
+        odt.year().try_into().ok()?,
+        odt.month() as u8,
+        odt.day(),
+        odt.hour(),
+        odt.minute(),
+        odt.second(),
+    )
+    .ok()
 }
 
 /// Translate a requested compression level into the method/level pair the
