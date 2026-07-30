@@ -196,8 +196,13 @@ fn add_dir_walked<'k>(
 /// the link target as the entry content). The `zip` crate sets `0o777`
 /// permissions by default; Windows unzip tools may materialise this as a
 /// regular text file containing the target path.
-fn write_symlink_entry<'k>(
-    zip: &mut ZipWriter<std::io::BufWriter<fs_err::File>>,
+///
+/// Generic over the writer so the modify-path rewrite (`ZipWriter<File>`)
+/// shares it with compress (`ZipWriter<BufWriter<File>>`) — appending a
+/// symlink used to go through `File::open`, silently dereferencing it into a
+/// regular file.
+pub(crate) fn write_symlink_entry<'k, W: io::Write + io::Seek>(
+    zip: &mut ZipWriter<W>,
     link_path: &Utf8Path,
     archive_name: &str,
     options: zip::write::FileOptions<'k, ()>,

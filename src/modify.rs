@@ -1024,6 +1024,12 @@ enum PlannedZipEntry {
         name: String,
         fs_path: Utf8PathBuf,
     },
+    /// Symlink stored as a symlink entry (compress-side semantics) rather
+    /// than being dereferenced into a regular file.
+    Symlink {
+        name: String,
+        fs_path: Utf8PathBuf,
+    },
     /// Bare directory entry, emitted only under `--no-recursion`.
     Dir {
         name: String,
@@ -1033,9 +1039,22 @@ enum PlannedZipEntry {
 impl PlannedZipEntry {
     fn name(&self) -> &str {
         match self {
-            Self::File { name, .. } | Self::Dir { name } => name,
+            Self::File { name, .. } | Self::Symlink { name, .. } | Self::Dir { name } => name,
         }
     }
+}
+
+/// Plan a walked filesystem object as the right zip entry kind: a symlink
+/// entry when it is a symlink and links are not being followed, a regular
+/// file otherwise.
+fn plan_zip_file(name: String, fs_path: Utf8PathBuf, follow_symlinks: bool) -> Result<PlannedZipEntry> {
+    let is_symlink =
+        !follow_symlinks && fs_err::symlink_metadata(&fs_path)?.file_type().is_symlink();
+    Ok(if is_symlink {
+        PlannedZipEntry::Symlink { name, fs_path }
+    } else {
+        PlannedZipEntry::File { name, fs_path }
+    })
 }
 
 fn zip_append(
@@ -1099,17 +1118,19 @@ fn plan_zip_entries(
                 if !should_add_zip_entry(&entry.archive_name, &meta, archive_idx) {
                     return Ok(());
                 }
-                planned.push(PlannedZipEntry::File {
-                    name: entry.archive_name,
-                    fs_path: entry.fs_path,
-                });
+                planned.push(plan_zip_file(
+                    entry.archive_name,
+                    entry.fs_path,
+                    opts.follow_symlinks,
+                )?);
                 Ok(())
             })?;
         } else if should_add_zip_entry(name, &meta, archive_idx) {
-            planned.push(PlannedZipEntry::File {
-                name: name.to_owned(),
-                fs_path: input.clone(),
-            });
+            planned.push(plan_zip_file(
+                name.to_owned(),
+                input.clone(),
+                opts.follow_symlinks,
+            )?);
         }
     }
     Ok(planned)
@@ -1149,6 +1170,9 @@ fn zip_rewrite_with(
         match entry {
             PlannedZipEntry::Dir { name } => {
                 dst.add_directory(format!("{name}/"), options)?;
+            }
+            PlannedZipEntry::Symlink { name, fs_path } => {
+                crate::zip::write_symlink_entry(&mut dst, fs_path, name, options, opts)?;
             }
             PlannedZipEntry::File { name, fs_path } => {
                 let meta = filter::input_metadata(fs_path, opts.follow_symlinks)?;
