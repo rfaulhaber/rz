@@ -160,6 +160,13 @@ fn write_symlink_entry<'k>(
 }
 
 
+/// Upper bound on a symlink target this crate is willing to read.
+///
+/// Linux caps symlink targets at PATH_MAX (4096) and every other platform is
+/// stricter, so double that is generous for anything legitimate while keeping
+/// a hostile entry from becoming an unbounded read.
+const MAX_SYMLINK_TARGET: u64 = 8 * 1024;
+
 /// Extract a zip symlink entry to `out_path`.
 ///
 /// On Unix, creates a real symlink via `std::os::unix::fs::symlink`.  On other
@@ -180,8 +187,21 @@ fn extract_symlink_entry(
     existed: bool,
     dest_path: &Utf8Path,
 ) -> Result<u64> {
-    let mut target_bytes = Vec::with_capacity(entry.size() as usize);
-    io::copy(entry, &mut target_bytes)?;
+    // Never size this from `entry.size()`.  That is the central directory's
+    // uncompressed_size, which the crate returns verbatim and never validates
+    // against the actual content, so a ZIP64 entry can declare u64::MAX with
+    // six bytes of payload behind it.  A failed `Vec::with_capacity` calls
+    // `handle_alloc_error`, which aborts rather than unwinding — no amount of
+    // panic-free discipline in this crate can catch that.
+    let mut target_bytes = Vec::new();
+    let read = io::copy(&mut io::Read::take(entry, MAX_SYMLINK_TARGET), &mut target_bytes)?;
+    if read >= MAX_SYMLINK_TARGET {
+        return Err(Error::SymlinkTargetTooLong {
+            path: dest_path.to_owned(),
+            max: MAX_SYMLINK_TARGET,
+        });
+    }
+
     let target = std::str::from_utf8(&target_bytes)
         .map_err(|_| Error::InvalidUtf8Path(dest_path.to_string()))?;
 

@@ -66,6 +66,9 @@ pub enum Error {
     #[error("path traversal detected in archive entry: {0}")]
     PathTraversal(String),
 
+    #[error("symlink target for `{path}` exceeds {max} bytes; refusing to read it")]
+    SymlinkTargetTooLong { path: Utf8PathBuf, max: u64 },
+
     #[error(
         "zstd: the pure-Rust encoder only accepts --level 0 (store, no \
          compression); omit --level to use the default fast-compression mode"
