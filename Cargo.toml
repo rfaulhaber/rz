@@ -26,6 +26,7 @@ camino = { version = "1.2", features = ["serde1"] }
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 clap_mangen = "0.2"
+filetime = "0.2"
 flate2 = "1.1"
 fs-err = "3.3"
 globset = "0.4"

@@ -834,6 +834,8 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
     // matching GNU tar's non-root behaviour.
     archive.set_preserve_ownerships(opts.same_owner);
 
+    let mut deferred_dirs: Vec<DeferredDir> = Vec::new();
+
     for entry in archive.entries()? {
         let mut entry = entry?;
         let orig_path = entry.path()?;
@@ -926,12 +928,87 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
 
         opts.progress.set_entry(dest_path.as_str());
         let size = entry.header().size().unwrap_or(0);
-        if entry_type == tar::EntryType::Link {
+        if is_dir {
+            // Create permissively now, record the header metadata for later:
+            // tar-rs's Entry::unpack chmods a directory immediately (even
+            // without -P), so a dr-xr-xr-x entry appearing before its own
+            // children would block their extraction with EACCES.  tar-rs's
+            // Archive::_unpack and GNU tar both defer directories the same
+            // way.
+            fs_err::create_dir_all(&dest)?;
+            let header = entry.header();
+            deferred_dirs.push(DeferredDir {
+                dest,
+                mode: header.mode().ok(),
+                mtime: header.mtime().ok(),
+                uid: header.uid().ok(),
+                gid: header.gid().ok(),
+            });
+        } else if entry_type == tar::EntryType::Link {
             unpack_hard_link(&entry, output, &dest, opts)?;
         } else {
             entry.unpack(&dest)?;
         }
         opts.progress.inc(size);
+    }
+
+    // Children before parents (reverse path order), so a directory that ends
+    // up read-only is locked down only after everything inside it — and its
+    // mtime is set after its children stop bumping it.
+    deferred_dirs.sort_by(|a, b| b.dest.as_str().cmp(a.dest.as_str()));
+    for dir in &deferred_dirs {
+        apply_deferred_dir(dir, opts)?;
+    }
+    Ok(())
+}
+
+/// Directory metadata held back until every entry is extracted.
+struct DeferredDir {
+    dest: Utf8PathBuf,
+    mode: Option<u32>,
+    mtime: Option<u64>,
+    uid: Option<u64>,
+    gid: Option<u64>,
+}
+
+/// Apply a deferred directory's ownership, mode, and mtime — the same
+/// semantics `Entry::unpack` would have applied inline: chown only under
+/// `--same-owner` (skipped without privilege, like tar-rs), the mode
+/// truncated to 0o777 and masked by the umask unless `-P`, and the mtime
+/// restored best-effort.  Ordering matters: chown first, since it clears
+/// setuid/setgid bits that a `-P` chmod may then restore.
+fn apply_deferred_dir(dir: &DeferredDir, opts: &DecompressOpts<'_>) -> Result<()> {
+    #[cfg(unix)]
+    {
+        if opts.same_owner
+            && let (Some(uid), Some(gid)) = (dir.uid, dir.gid)
+        {
+            match std::os::unix::fs::chown(&dir.dest, Some(uid as u32), Some(gid as u32)) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+                other => other?,
+            }
+        }
+        if let Some(mode) = dir.mode {
+            let mode = if opts.preserve_permissions {
+                mode
+            } else {
+                (mode & 0o777) & !process_umask()
+            };
+            fs_err::set_permissions(
+                &dir.dest,
+                std::fs::Permissions::from_mode(mode & 0o7777),
+            )?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir.mode, dir.uid, dir.gid, opts);
+    }
+    if let Some(mtime) = dir.mtime {
+        // Best-effort, like the file-side mtime restoration elsewhere: a
+        // filesystem that refuses timestamps must not fail the extraction.
+        let ft = filetime::FileTime::from_unix_time(mtime as i64, 0);
+        let _ = filetime::set_file_times(dir.dest.as_std_path(), ft, ft);
     }
     Ok(())
 }
