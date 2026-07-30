@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -34,15 +35,43 @@ pub(crate) fn with_unix_mode<'k>(
     }
 }
 
+/// Translate a requested compression level into the method/level pair the
+/// `zip` crate accepts.
+///
+/// Level 0 — what `--store` maps to — means "no compression", but the crate's
+/// deflate range starts at 1 and its `Stored` method rejects *any* explicit
+/// level, so the method and the level have to be chosen together.
+pub(crate) fn compression_settings(level: Option<u32>) -> (CompressionMethod, Option<i64>) {
+    match level {
+        Some(0) => (CompressionMethod::Stored, None),
+        other => (CompressionMethod::Deflated, other.map(i64::from)),
+    }
+}
+
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
 
     let file = fs_err::File::create(output)?;
+    let result = write_archive(file, &inputs, opts);
+    if result.is_err() {
+        // `ZipWriter`'s `Drop` finalises whatever was written, so bailing out
+        // mid-run would otherwise leave a valid-but-empty archive on disk.
+        let _ = fs_err::remove_file(output);
+    }
+    result
+}
+
+fn write_archive(
+    file: fs_err::File,
+    inputs: &[Utf8PathBuf],
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
     let mut zip = ZipWriter::new(std::io::BufWriter::new(file));
 
+    let (method, level) = compression_settings(opts.level);
     let base_options = SimpleFileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .compression_level(opts.level.map(i64::from));
+        .compression_method(method)
+        .compression_level(level);
 
     // When encryption is active the lifetime of `FileOptions` is tied to the
     // password string, so we must hold the two branches separately.
@@ -53,7 +82,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     // borrow checker happy about the lifetime of `options`.
     if let Some(ref pwd) = opts.password {
         let options = base_options.with_aes_encryption(AesMode::Aes256, pwd.as_str());
-        for input in &inputs {
+        for input in inputs {
             let meta = filter::input_metadata(input, opts.follow_symlinks)?;
             let name = input.file_name().unwrap_or(input.as_str());
             if !opts.follow_symlinks && meta.file_type().is_symlink() {
@@ -73,7 +102,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
             }
         }
     } else {
-        for input in &inputs {
+        for input in inputs {
             let meta = filter::input_metadata(input, opts.follow_symlinks)?;
             let name = input.file_name().unwrap_or(input.as_str());
             if !opts.follow_symlinks && meta.file_type().is_symlink() {
@@ -228,124 +257,177 @@ fn extract_symlink_entry(
 // ── Decompress ────────────────────────────────────────────────────────────────
 
 pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
-    let (len, shared_metadata) = {
+    let (groups, shared_metadata) = {
         let file = fs_err::File::open(input)?;
-        let archive = ZipArchive::new(file)?;
-        (archive.len(), archive.metadata())
+        let mut archive = ZipArchive::new(file)?;
+        let metadata = archive.metadata();
+        (plan_destinations(&mut archive, opts)?, metadata)
     };
 
     let password = opts.password.clone();
-    (0..len).into_par_iter().try_for_each_init(
+    groups.into_par_iter().try_for_each_init(
         || -> Option<ZipArchive<fs_err::File>> {
             let file = fs_err::File::open(input).ok()?;
             // SAFETY: metadata was parsed from the same file.
             Some(unsafe { ZipArchive::unsafe_new_with_metadata(file, shared_metadata.clone()) })
         },
-        |maybe_archive, i| -> Result<()> {
+        |maybe_archive, (dest_path, indices)| -> Result<()> {
             let archive = maybe_archive
                 .as_mut()
                 .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
-            let mut entry = open_zip_entry(archive, i, password.as_deref())?;
-            let name = Utf8PathBuf::from(entry.name());
-
-            // Reject entries that attempt path traversal.
-            filter::safe_entry_path(name.as_str())?;
-
-            if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
-                return Ok(());
-            }
-
-            if opts.no_directory && entry.is_dir() {
-                return Ok(());
-            }
-
-            let stripped = match filter::strip_components(&name, opts.strip_components) {
-                Some(p) => p,
-                None => return Ok(()),
-            };
-
-            let dest_path = if opts.no_directory {
-                match stripped.file_name() {
-                    Some(name) => Utf8PathBuf::from(name),
-                    None => return Ok(()),
-                }
-            } else {
-                stripped
-            };
-
-            // Apply rename rules and optional prefix.
-            let dest_path = match filter::apply_path_rewrites(
-                dest_path,
-                &opts.renames,
-                opts.prefix.as_deref(),
-            )? {
-                p if p.as_str().is_empty() => return Ok(()),
-                p => p,
-            };
-
-            let out_path = output.join(&dest_path);
-
-            if entry.is_dir() {
-                fs_err::create_dir_all(&out_path)?;
-            } else {
-                if let Some(parent) = out_path.parent() {
-                    fs_err::create_dir_all(parent)?;
-                }
-                let existed = fs_err::symlink_metadata(&out_path).is_ok();
-                if existed {
-                    if let Some(ref suffix) = opts.backup_suffix {
-                        let backup = Utf8PathBuf::from(format!("{out_path}{suffix}"));
-                        fs_err::rename(&out_path, &backup)?;
-                    } else if opts.keep_newer {
-                        let entry_mtime = entry
-                            .last_modified()
-                            .map(zip_datetime_to_epoch)
-                            .unwrap_or(0);
-                        if filter::is_existing_newer(&out_path, entry_mtime)? {
-                            return Ok(());
-                        }
-                    } else if opts.no_overwrite {
-                        return Ok(());
-                    } else if !opts.force {
-                        return Err(Error::FileExists(out_path));
-                    }
-                }
-
-                if entry.is_symlink() {
-                    let written =
-                        extract_symlink_entry(&mut entry, &out_path, existed, &dest_path)?;
-                    opts.progress.set_entry(dest_path.as_str());
-                    opts.progress.inc(written);
-                } else {
-                    let unix_mode = entry.unix_mode();
-                    // If overwriting an existing symlink, remove it first so the
-                    // new file replaces the link rather than the link's target.
-                    if existed
-                        && fs_err::symlink_metadata(&out_path)?
-                            .file_type()
-                            .is_symlink()
-                    {
-                        fs_err::remove_file(&out_path)?;
-                    }
-                    let mut out_file = fs_err::File::create(&out_path)?;
-                    let written = io::copy(&mut entry, &mut out_file)?;
-                    #[cfg(unix)]
-                    if opts.preserve_permissions
-                        && let Some(mode) = unix_mode
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        fs_err::set_permissions(
-                            &out_path,
-                            std::fs::Permissions::from_mode(mode & 0o7777),
-                        )?;
-                    }
-                    opts.progress.set_entry(dest_path.as_str());
-                    opts.progress.inc(written);
-                }
+            for index in indices {
+                extract_entry(
+                    archive,
+                    index,
+                    &dest_path,
+                    output,
+                    opts,
+                    password.as_deref(),
+                )?;
             }
             Ok(())
         },
     )?;
+    Ok(())
+}
+
+/// Resolve every entry's destination up front and bucket the archive indices by
+/// it, keeping each bucket in ascending index order.
+///
+/// Flattening (`--no-directory`), `--strip-components` and rename rules all
+/// routinely collapse several entries onto one destination.  Handing a whole
+/// bucket to a single worker is what keeps a destination owned by exactly one
+/// thread, so the overwrite decision and the write that follows it stay
+/// indivisible and the surviving file is the archive's last entry for that
+/// path, exactly as in a serial run.
+fn plan_destinations(
+    archive: &mut ZipArchive<fs_err::File>,
+    opts: &DecompressOpts<'_>,
+) -> Result<Vec<(Utf8PathBuf, Vec<usize>)>> {
+    let mut groups: BTreeMap<Utf8PathBuf, Vec<usize>> = BTreeMap::new();
+    for index in 0..archive.len() {
+        // Raw access: names and directory-ness come from the central directory,
+        // so planning costs no decompression and needs no password.
+        let entry = archive.by_index_raw(index)?;
+        let name = Utf8PathBuf::from(entry.name());
+        let is_dir = entry.is_dir();
+        drop(entry);
+
+        if let Some(dest) = resolve_destination(&name, is_dir, opts)? {
+            groups.entry(dest).or_default().push(index);
+        }
+    }
+    Ok(groups.into_iter().collect())
+}
+
+/// Run one entry name through the filter and rewrite chain, yielding its
+/// destination relative to the output root, or `None` when the entry is
+/// filtered out.
+fn resolve_destination(
+    name: &Utf8Path,
+    is_dir: bool,
+    opts: &DecompressOpts<'_>,
+) -> Result<Option<Utf8PathBuf>> {
+    // Reject entries that attempt path traversal.
+    filter::safe_entry_path(name.as_str())?;
+
+    if !filter::should_extract(name.as_str(), &opts.includes, &opts.excludes) {
+        return Ok(None);
+    }
+
+    if opts.no_directory && is_dir {
+        return Ok(None);
+    }
+
+    let stripped = match filter::strip_components(name, opts.strip_components) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let dest_path = if opts.no_directory {
+        match stripped.file_name() {
+            Some(name) => Utf8PathBuf::from(name),
+            None => return Ok(None),
+        }
+    } else {
+        stripped
+    };
+
+    // Apply rename rules and optional prefix.
+    match filter::apply_path_rewrites(dest_path, &opts.renames, opts.prefix.as_deref())? {
+        p if p.as_str().is_empty() => Ok(None),
+        p => Ok(Some(p)),
+    }
+}
+
+/// Extract a single entry to the destination [`plan_destinations`] resolved for
+/// it, applying the overwrite policy.
+fn extract_entry(
+    archive: &mut ZipArchive<fs_err::File>,
+    index: usize,
+    dest_path: &Utf8Path,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+    password: Option<&str>,
+) -> Result<()> {
+    let mut entry = open_zip_entry(archive, index, password)?;
+    let out_path = output.join(dest_path);
+
+    if entry.is_dir() {
+        fs_err::create_dir_all(&out_path)?;
+        return Ok(());
+    }
+
+    if let Some(parent) = out_path.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    let existed = fs_err::symlink_metadata(&out_path).is_ok();
+    if existed {
+        if let Some(ref suffix) = opts.backup_suffix {
+            let backup = Utf8PathBuf::from(format!("{out_path}{suffix}"));
+            fs_err::rename(&out_path, &backup)?;
+        } else if opts.keep_newer {
+            let entry_mtime = entry
+                .last_modified()
+                .map(zip_datetime_to_epoch)
+                .unwrap_or(0);
+            if filter::is_existing_newer(&out_path, entry_mtime)? {
+                return Ok(());
+            }
+        } else if opts.no_overwrite {
+            return Ok(());
+        } else if !opts.force {
+            return Err(Error::FileExists(out_path));
+        }
+    }
+
+    if entry.is_symlink() {
+        let written = extract_symlink_entry(&mut entry, &out_path, existed, dest_path)?;
+        opts.progress.set_entry(dest_path.as_str());
+        opts.progress.inc(written);
+    } else {
+        let unix_mode = entry.unix_mode();
+        // If overwriting an existing symlink, remove it first so the new file
+        // replaces the link rather than the link's target.
+        if existed
+            && fs_err::symlink_metadata(&out_path)?
+                .file_type()
+                .is_symlink()
+        {
+            fs_err::remove_file(&out_path)?;
+        }
+        let mut out_file = fs_err::File::create(&out_path)?;
+        let written = io::copy(&mut entry, &mut out_file)?;
+        #[cfg(unix)]
+        if opts.preserve_permissions
+            && let Some(mode) = unix_mode
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs_err::set_permissions(&out_path, std::fs::Permissions::from_mode(mode & 0o7777))?;
+        }
+        opts.progress.set_entry(dest_path.as_str());
+        opts.progress.inc(written);
+    }
     Ok(())
 }
 
