@@ -184,6 +184,7 @@ fn resolve_stdin_source(format: Option<Format>) -> Result<(Format, StdinReader)>
         Some(f) => f,
         None => Format::from_magic_bytes(&prefix).ok_or(Error::CannotInferFormatStdin)?,
     };
+    rz_archive::format::ensure_format_enabled(&fmt)?;
 
     // zip and 7z need seekable input to read their central directory / header.
     if requires_seek(&fmt) {
@@ -345,6 +346,7 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 resolve_compress_format(format, output.as_deref())?
             };
+            rz_archive::format::ensure_format_enabled(&fmt)?;
 
             if to_stdout && requires_seek(&fmt) {
                 return Err(Error::StdoutNotSupported(fmt.to_string()));
@@ -480,6 +482,7 @@ fn run(cli: Cli) -> Result<()> {
                     Some(p) => resolve_input_format(format, p)?,
                     None => return Err(Error::NoInput),
                 };
+                rz_archive::format::ensure_format_enabled(&fmt)?;
                 (fmt, None)
             };
             // From here on treat input as a concrete path; it is empty and
@@ -734,6 +737,7 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 let input = input.unwrap_or_default();
                 let fmt = resolve_input_format(format, &input)?;
+                rz_archive::format::ensure_format_enabled(&fmt)?;
                 reject_encryption_for_non_supported(&fmt, &password)?;
                 match fmt {
                     Format::Zip => zip::list(&input)?,
@@ -815,6 +819,7 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 let input = input.unwrap_or_default();
                 let fmt = resolve_input_format(format, &input)?;
+                rz_archive::format::ensure_format_enabled(&fmt)?;
                 reject_encryption_for_non_supported(&fmt, &password)?;
                 match fmt {
                     Format::Zip => zip::test(&input, password.as_deref(), progress)?,
@@ -854,6 +859,7 @@ fn run(cli: Cli) -> Result<()> {
                 // not `-`.
                 let input = input.unwrap_or_default();
                 let fmt = resolve_input_format(format, &input)?;
+                rz_archive::format::ensure_format_enabled(&fmt)?;
                 reject_encryption_for_non_supported(&fmt, &password)?;
                 match fmt {
                     Format::Zip => zip::info(&input)?,
@@ -958,6 +964,7 @@ fn run(cli: Cli) -> Result<()> {
             level,
         } => {
             let fmt = resolve_input_format(format, &archive)?;
+            rz_archive::format::ensure_format_enabled(&fmt)?;
             modify::remove(&archive, fmt, &patterns, level)?;
         }
 
@@ -990,6 +997,7 @@ fn run_append(
     mode: AppendMode,
 ) -> Result<()> {
     let fmt = resolve_input_format(format, &archive)?;
+    rz_archive::format::ensure_format_enabled(&fmt)?;
     let excludes = filter::build_excludes(exclude, &exclude_from)?;
     let base_progress: Box<dyn ProgressReport> = if show_progress {
         Box::new(BarProgress::spinner())
@@ -1137,6 +1145,8 @@ fn run_convert(
 ) -> Result<()> {
     let fmt_in = resolve_input_format(from_format, &input)?;
     let fmt_out = resolve_convert_output_format(to_format, output.as_deref())?;
+    rz_archive::format::ensure_format_enabled(&fmt_in)?;
+    rz_archive::format::ensure_format_enabled(&fmt_out)?;
 
     let output_path = match output {
         Some(p) => p,

@@ -83,9 +83,9 @@ pub fn append(
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => tar_compressed_append(archive, fmt, inputs, mode, opts),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(Error::ModifyUnsupported {
-            operation: op,
+        Format::TarBz2 => Err(Error::FormatFeatureDisabled {
             format: fmt.to_string(),
+            feature: "bzip2",
         }),
         Format::Zip => zip_append(archive, inputs, mode, opts),
         Format::SevenZ => Err(Error::ModifyUnsupported {
@@ -110,9 +110,9 @@ pub fn remove(
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => tar_compressed_remove(archive, fmt, &glob, level),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(Error::ModifyUnsupported {
-            operation: "remove",
+        Format::TarBz2 => Err(Error::FormatFeatureDisabled {
             format: fmt.to_string(),
+            feature: "bzip2",
         }),
         Format::Zip => zip_remove(archive, &glob),
         Format::SevenZ => Err(Error::ModifyUnsupported {
@@ -408,9 +408,9 @@ fn open_tar_reader(archive: &Utf8Path, fmt: Format) -> Result<Box<dyn Read>> {
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => Ok(Box::new(bzip2::read::BzDecoder::new(buf))),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(Error::ModifyUnsupported {
-            operation: "read",
+        Format::TarBz2 => Err(Error::FormatFeatureDisabled {
             format: fmt.to_string(),
+            feature: "bzip2",
         }),
         Format::Zip | Format::SevenZ => Err(Error::ModifyUnsupported {
             operation: "tar-reader",
@@ -446,9 +446,9 @@ fn tar_compressed_writer(
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => Ok(Box::new(Bz2Handle::new(writer, level.unwrap_or(6))?)),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(Error::ModifyUnsupported {
-            operation: "rewrite",
+        Format::TarBz2 => Err(Error::FormatFeatureDisabled {
             format: fmt.to_string(),
+            feature: "bzip2",
         }),
         _ => Err(Error::ModifyUnsupported {
             operation: "rewrite",

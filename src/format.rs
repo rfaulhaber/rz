@@ -169,6 +169,25 @@ impl Format {
     }
 }
 
+/// Error when `fmt`'s backing feature is compiled out of this build.
+///
+/// `tar-bz2` is always a valid clap value and is always detected by magic
+/// bytes, but its dispatch arms are gated on the `bzip2` feature.  Without
+/// this check a disabled format falls through to catch-all arms that blame
+/// stdin/stdout seekability or claim the format is unsupported outright —
+/// both false diagnoses.  Call right after resolving a format.
+pub fn ensure_format_enabled(fmt: &Format) -> Result<()> {
+    #[cfg(not(feature = "bzip2"))]
+    if matches!(fmt, Format::TarBz2) {
+        return Err(Error::FormatFeatureDisabled {
+            format: fmt.to_string(),
+            feature: "bzip2",
+        });
+    }
+    let _ = fmt;
+    Ok(())
+}
+
 /// Resolve format for `compress`: explicit flag → output extension.
 pub fn resolve_compress_format(
     explicit: Option<Format>,

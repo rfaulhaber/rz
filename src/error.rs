@@ -119,4 +119,10 @@ pub enum Error {
          use GNU tar for sparse archives"
     )]
     SparseModifyUnsupported,
+
+    #[error("{format} support is not compiled into this build (rebuild with --features {feature})")]
+    FormatFeatureDisabled {
+        format: String,
+        feature: &'static str,
+    },
 }
