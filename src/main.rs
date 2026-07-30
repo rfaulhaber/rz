@@ -289,6 +289,15 @@ fn run(cli: Cli) -> Result<()> {
                 input.extend(extra);
             }
 
+            // `input` can only be empty here when it came entirely from
+            // --files-from (clap requires it otherwise) and the list held no
+            // usable lines.  Bail before the dry-run branch silently prints
+            // nothing and before `fmt.default_output(&input[0])` indexes an
+            // empty vec.
+            if input.is_empty() {
+                return Err(Error::NoReadableInputs);
+            }
+
             // Build combined exclude set.
             let mut extra_patterns = exclude;
             if exclude_vcs {
