@@ -113,4 +113,10 @@ pub enum Error {
 
     #[error("password is empty")]
     EmptyPassword,
+
+    #[error(
+        "archive contains GNU sparse entries, which modify operations cannot rewrite safely; \
+         use GNU tar for sparse archives"
+    )]
+    SparseModifyUnsupported,
 }

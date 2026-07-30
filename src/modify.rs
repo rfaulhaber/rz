@@ -164,6 +164,19 @@ fn tar_append(
         let mut max_end: u64 = 0;
         for entry in a.entries()? {
             let entry = entry?;
+            // `entry.size()` for a GNU sparse entry is the expanded logical
+            // size (tar-rs's sparse-header parser sets it from the header's
+            // real-size field), not the physical bytes stored in the
+            // archive. Trusting it here would push `body_end` past the
+            // entry's actual on-disk extent, and the `set_len` in
+            // `tar_write_appended` would then extend the archive across the
+            // sparse hole instead of truncating trailing zero blocks —
+            // silently corrupting the file. Refuse before anything is
+            // written; this scan is read-only, so no mutation has happened
+            // yet.
+            if entry.header().entry_type().is_gnu_sparse() {
+                return Err(Error::SparseModifyUnsupported);
+            }
             let end = entry
                 .raw_file_position()
                 .saturating_add(round_to_block(entry.size()));
@@ -492,6 +505,17 @@ fn copy_tar_entries<W: Write>(
     let mut a = tar::Archive::new(reader);
     for entry in a.entries()? {
         let mut entry = entry?;
+        // Same hazard as `tar_append`'s body_end scan: a GNU sparse entry's
+        // `size()` is the expanded logical size, so `append_data` below
+        // would read that many bytes from `entry` under a cloned header that
+        // still describes the sparse layout — corrupting the re-emitted
+        // entry and misaligning every entry written after it. Every
+        // read-rewrite path (compressed append, remove, compressed remove)
+        // funnels through here, so refusing before the copy starts keeps the
+        // temp file from ever being renamed over the original.
+        if entry.header().entry_type().is_gnu_sparse() {
+            return Err(Error::SparseModifyUnsupported);
+        }
         let path = entry.path()?;
         let name = path
             .to_str()
@@ -778,10 +802,25 @@ fn tar_compressed_append(
     mode: AppendMode,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
-    let level = opts.level.or_else(|| default_level_for(fmt));
     let tmp = temp_path(archive);
+    let res = tar_compressed_append_into(archive, &tmp, fmt, inputs, mode, opts);
+    if res.is_err() {
+        let _ = fs_err::remove_file(&tmp);
+    }
+    res
+}
 
-    let out_file = fs_err::File::create(&tmp)?;
+fn tar_compressed_append_into(
+    archive: &Utf8Path,
+    tmp: &Utf8Path,
+    fmt: Format,
+    inputs: &[Utf8PathBuf],
+    mode: AppendMode,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    let level = opts.level.or_else(|| default_level_for(fmt));
+
+    let out_file = fs_err::File::create(tmp)?;
     let out_buf = BufWriter::new(out_file);
     let mut handle = tar_compressed_writer(fmt, out_buf, level)?;
 
@@ -797,7 +836,7 @@ fn tar_compressed_append(
     handle.append_inputs(inputs, opts, idx_for_update)?;
     handle.finish()?;
 
-    fs_err::rename(&tmp, archive)?;
+    fs_err::rename(tmp, archive)?;
     Ok(())
 }
 
@@ -806,7 +845,15 @@ fn tar_remove(archive: &Utf8Path, glob: &GlobSet) -> Result<()> {
     // done in place by truncating after each surviving entry, but the temp
     // file approach is simpler and atomic via rename.
     let tmp = temp_path(archive);
-    let out_file = fs_err::File::create(&tmp)?;
+    let res = tar_remove_into(archive, &tmp, glob);
+    if res.is_err() {
+        let _ = fs_err::remove_file(&tmp);
+    }
+    res
+}
+
+fn tar_remove_into(archive: &Utf8Path, tmp: &Utf8Path, glob: &GlobSet) -> Result<()> {
+    let out_file = fs_err::File::create(tmp)?;
     let out_buf = BufWriter::new(out_file);
     let mut builder = tar::Builder::new(out_buf);
 
@@ -818,7 +865,7 @@ fn tar_remove(archive: &Utf8Path, glob: &GlobSet) -> Result<()> {
     let buf = builder.into_inner()?;
     let file = buf.into_inner().map_err(std::io::Error::other)?;
     file.sync_all()?;
-    fs_err::rename(&tmp, archive)?;
+    fs_err::rename(tmp, archive)?;
     Ok(())
 }
 
@@ -828,9 +875,23 @@ fn tar_compressed_remove(
     glob: &GlobSet,
     level: Option<u32>,
 ) -> Result<()> {
-    let level = level.or_else(|| default_level_for(fmt));
     let tmp = temp_path(archive);
-    let out_file = fs_err::File::create(&tmp)?;
+    let res = tar_compressed_remove_into(archive, &tmp, fmt, glob, level);
+    if res.is_err() {
+        let _ = fs_err::remove_file(&tmp);
+    }
+    res
+}
+
+fn tar_compressed_remove_into(
+    archive: &Utf8Path,
+    tmp: &Utf8Path,
+    fmt: Format,
+    glob: &GlobSet,
+    level: Option<u32>,
+) -> Result<()> {
+    let level = level.or_else(|| default_level_for(fmt));
+    let out_file = fs_err::File::create(tmp)?;
     let out_buf = BufWriter::new(out_file);
     let mut handle = tar_compressed_writer(fmt, out_buf, level)?;
 
@@ -846,7 +907,7 @@ fn tar_compressed_remove(
     handle.append_inputs(empty, &opts, None)?;
     handle.finish()?;
 
-    fs_err::rename(&tmp, archive)?;
+    fs_err::rename(tmp, archive)?;
     Ok(())
 }
 
@@ -1045,9 +1106,17 @@ fn should_add_zip_entry(
 
 fn zip_remove(archive: &Utf8Path, glob: &GlobSet) -> Result<()> {
     let tmp = temp_path(archive);
+    let res = zip_remove_into(archive, &tmp, glob);
+    if res.is_err() {
+        let _ = fs_err::remove_file(&tmp);
+    }
+    res
+}
+
+fn zip_remove_into(archive: &Utf8Path, tmp: &Utf8Path, glob: &GlobSet) -> Result<()> {
     let in_file = fs_err::File::open(archive)?;
     let mut src = zip::ZipArchive::new(in_file)?;
-    let out_file = fs_err::File::create(&tmp)?;
+    let out_file = fs_err::File::create(tmp)?;
     let mut dst = zip::ZipWriter::new(out_file);
 
     for i in 0..src.len() {
@@ -1063,6 +1132,6 @@ fn zip_remove(archive: &Utf8Path, glob: &GlobSet) -> Result<()> {
 
     let file = dst.finish()?;
     file.sync_all()?;
-    fs_err::rename(&tmp, archive)?;
+    fs_err::rename(tmp, archive)?;
     Ok(())
 }
