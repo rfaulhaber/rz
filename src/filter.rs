@@ -803,6 +803,24 @@ pub fn count_tar_entries<R: std::io::Read>(archive: &mut tar::Archive<R>) -> Res
     Ok((entry_count, total_uncompressed))
 }
 
+/// The process umask, read once per process.
+///
+/// umask(2) can only be read by writing it, so set-and-restore.  The scratch
+/// value is visible to other threads for a moment, but tar extraction is the
+/// only operation running when this is first called and it creates files
+/// serially, so nothing can race the window in practice.
+#[cfg(unix)]
+fn process_umask() -> u32 {
+    use std::sync::OnceLock;
+    static UMASK: OnceLock<u32> = OnceLock::new();
+    *UMASK.get_or_init(|| {
+        // SAFETY: umask(2) only swaps a per-process value and cannot fail.
+        let mask = unsafe { libc::umask(0) };
+        unsafe { libc::umask(mask) };
+        mask as u32
+    })
+}
+
 /// Extract entries from a tar archive, honouring exclude patterns and
 /// path-component stripping.  Reports progress per entry.
 pub fn unpack_tar_filtered<R: std::io::Read>(
@@ -894,6 +912,16 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             } else if !opts.force {
                 return Err(Error::FileExists(dest));
             }
+        }
+
+        // GNU tar masks extracted modes with the process umask unless -p is
+        // given; tar-rs's set_preserve_permissions(false) only truncates to
+        // 0o777, which still yields world-writable files from a mode-0777
+        // entry.  Entry::set_mask applies `mode & !mask` on top, for files
+        // and directories alike.
+        #[cfg(unix)]
+        if !opts.preserve_permissions {
+            entry.set_mask(process_umask());
         }
 
         opts.progress.set_entry(dest_path.as_str());

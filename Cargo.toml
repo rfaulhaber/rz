@@ -45,6 +45,9 @@ xz2 = { version = "0.1", optional = true }
 sevenz-rust2 = "0.20"
 zip = "8.5"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
