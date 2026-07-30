@@ -124,22 +124,32 @@ pub fn remove(
 
 // ── tar (uncompressed) ───────────────────────────────────────────────────────
 
-/// Build an `entry-name → mtime (unix seconds)` index from an uncompressed
-/// tar file.  Used by `update` mode to decide whether each filesystem input
-/// is newer than the corresponding archive entry.
-fn tar_index_uncompressed(archive: &Utf8Path) -> Result<HashMap<String, u64>> {
-    let file = fs_err::File::open(archive)?;
-    let mut a = tar::Archive::new(BufReader::new(file));
+/// Build an `entry-name → mtime (unix seconds)` index from a tar stream.
+/// Used by `update` mode to decide whether each filesystem input is newer
+/// than the corresponding archive entry.
+///
+/// Keys are normalized without a trailing slash: GNU tar stores directory
+/// entries as `dir/` while the walk produces `dir`, and a missed lookup
+/// would make every update re-emit every directory.
+fn tar_index_from_reader(reader: &mut dyn Read) -> Result<HashMap<String, u64>> {
+    let mut a = tar::Archive::new(reader);
     let mut idx = HashMap::new();
     for entry in a.entries()? {
         let entry = entry?;
         let path = entry.path()?;
         if let Some(name) = path.to_str() {
             let mtime = entry.header().mtime().unwrap_or(0);
-            idx.insert(name.to_owned(), mtime);
+            idx.insert(name.trim_end_matches('/').to_owned(), mtime);
         }
     }
     Ok(idx)
+}
+
+/// [`tar_index_from_reader`] over an uncompressed tar file on disk.
+fn tar_index_uncompressed(archive: &Utf8Path) -> Result<HashMap<String, u64>> {
+    let file = fs_err::File::open(archive)?;
+    let mut buf = BufReader::new(file);
+    tar_index_from_reader(&mut buf)
 }
 
 fn tar_append(
@@ -324,6 +334,19 @@ fn append_inputs_with_index<W: Write>(
     Ok(())
 }
 
+/// Decide whether an update-walk entry gets (re)written: strictly newer on
+/// disk than the archive's copy, or absent from the archive entirely.
+///
+/// The single decision point shared by [`walk_and_append_with_index`] (which
+/// writes) and [`plan_update_names`] (which predicts what will be written so
+/// the copy pass can drop the stale copies) — one rule, so the two walks
+/// cannot drift.  Directory entries are gated the same way as files: their
+/// unconditional re-emission used to duplicate every directory on every
+/// update.
+fn update_wants(name: &str, meta: &std::fs::Metadata, idx: &HashMap<String, u64>) -> bool {
+    is_newer_than_archive(name.trim_end_matches('/'), mtime_secs(meta), idx)
+}
+
 fn walk_and_append_with_index<W: Write>(
     builder: &mut tar::Builder<W>,
     dir: &Utf8Path,
@@ -332,28 +355,64 @@ fn walk_and_append_with_index<W: Write>(
     idx: &HashMap<String, u64>,
 ) -> Result<()> {
     if opts.no_recursion {
-        // Add only the directory entry itself.
-        builder.append_dir(prefix, dir.as_std_path())?;
+        let meta = filter::input_metadata(dir, opts.follow_symlinks)?;
+        if update_wants(prefix, &meta, idx) {
+            builder.append_dir(prefix, dir.as_std_path())?;
+        }
         return Ok(());
     }
     filter::walk_dir(dir, prefix, opts, &mut |entry| {
+        let meta = filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+        if !update_wants(&entry.archive_name, &meta, idx) {
+            return Ok(());
+        }
         if entry.is_dir {
-            // Tar update doesn't gate directory entries — gnu tar emits dir
-            // entries whenever any file inside is updated.  We always emit
-            // them so an updated child's parent path exists in the archive.
             builder.append_dir(&entry.archive_name, entry.fs_path.as_std_path())?;
         } else {
-            let meta = filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
-            let fs_mtime = mtime_secs(&meta);
-            if !is_newer_than_archive(&entry.archive_name, fs_mtime, idx) {
-                return Ok(());
-            }
             append_one_file(builder, &entry.fs_path, &entry.archive_name, opts)?;
             opts.progress.set_entry(&entry.archive_name);
             opts.progress.inc(meta.len());
         }
         Ok(())
     })
+}
+
+/// Predict the archive names an update walk over `inputs` will write, so the
+/// read-rewrite copy pass can skip the entries being superseded instead of
+/// carrying both versions.  Mirrors [`append_inputs_with_index`] exactly via
+/// the shared [`update_wants`] gate; names are normalized without trailing
+/// slashes to match the index keys.
+fn plan_update_names(
+    inputs: &[Utf8PathBuf],
+    opts: &CompressOpts<'_>,
+    idx: &HashMap<String, u64>,
+) -> Result<HashSet<String>> {
+    let mut planned = HashSet::new();
+    for input in inputs {
+        let meta = filter::input_metadata(input, opts.follow_symlinks)?;
+        let name = input.file_name().unwrap_or(input.as_str());
+        if opts.excludes.is_match(name) {
+            continue;
+        }
+        if meta.is_dir() {
+            if opts.no_recursion {
+                if update_wants(name, &meta, idx) {
+                    planned.insert(name.trim_end_matches('/').to_owned());
+                }
+                continue;
+            }
+            filter::walk_dir(input, name, opts, &mut |entry| {
+                let entry_meta = filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+                if update_wants(&entry.archive_name, &entry_meta, idx) {
+                    planned.insert(entry.archive_name.trim_end_matches('/').to_owned());
+                }
+                Ok(())
+            })?;
+        } else if update_wants(name, &meta, idx) {
+            planned.insert(name.to_owned());
+        }
+    }
+    Ok(planned)
 }
 
 fn append_one_file<W: Write>(
@@ -826,20 +885,30 @@ fn tar_compressed_append_into(
 ) -> Result<()> {
     let level = opts.level.or_else(|| default_level_for(fmt));
 
+    // Update needs the archive's name→mtime index *before* the copy pass:
+    // the keep closure below drops the stale copies of entries about to be
+    // rewritten.  A keep-all copy used to leave both versions in the archive
+    // — extraction still yielded the newer one (last wins), but list/info
+    // reported doubled counts and the archive grew without bound.  The extra
+    // decompression pass is the price of a correct plan.
+    let (archive_idx, superseded) = if mode == AppendMode::Update {
+        let mut reader = open_tar_reader(archive, fmt)?;
+        let idx = tar_index_from_reader(&mut reader)?;
+        let planned = plan_update_names(inputs, opts, &idx)?;
+        (Some(idx), planned)
+    } else {
+        (None, HashSet::new())
+    };
+
     let out_file = fs_err::File::create(tmp)?;
     let out_buf = BufWriter::new(out_file);
     let mut handle = tar_compressed_writer(fmt, out_buf, level)?;
 
     let mut reader = open_tar_reader(archive, fmt)?;
-    let mut keep_all = |_: &str| true;
-    let archive_idx = handle.copy_existing(&mut reader, &mut keep_all)?;
+    let mut keep = |name: &str| !superseded.contains(name.trim_end_matches('/'));
+    let _ = handle.copy_existing(&mut reader, &mut keep)?;
 
-    let idx_for_update = if mode == AppendMode::Update {
-        Some(&archive_idx)
-    } else {
-        None
-    };
-    handle.append_inputs(inputs, opts, idx_for_update)?;
+    handle.append_inputs(inputs, opts, archive_idx.as_ref())?;
     handle.finish()?;
 
     fs_err::rename(tmp, archive)?;
