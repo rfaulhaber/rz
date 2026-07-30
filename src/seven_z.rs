@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use sevenz_rust2::encoder_options::{AesEncoderOptions, Lzma2Options};
-use sevenz_rust2::{EncoderConfiguration, EncoderMethod, Password};
+use sevenz_rust2::{ArchiveEntry, EncoderConfiguration, EncoderMethod, Password};
 
 use crate::error::{Error, Result};
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
@@ -56,11 +56,18 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
 }
 
 /// Walk a directory with VCS-ignore awareness and add entries to the 7z writer.
+///
+/// Entries are pushed one file at a time via `push_archive_entry` with an
+/// explicit archive-relative name. `push_source_path` derives the archive name
+/// from the source path itself, which collapses to the bare file name when
+/// that path is a single file — same-named files in different subdirectories
+/// would then collide and overwrite one another in the archive.
 fn push_dir_vcs(
     writer: &mut sevenz_rust2::ArchiveWriter<std::fs::File>,
     dir: &Utf8Path,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
+    let excludes = &opts.excludes;
     for result in crate::filter::vcs_walker(dir, opts.follow_symlinks) {
         let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
         let fs_path = entry.path();
@@ -75,8 +82,21 @@ fn push_dir_vcs(
             .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?;
         let utf8_path = Utf8Path::new(utf8_str);
 
-        let excludes = &opts.excludes;
-        writer.push_source_path(utf8_path, |name| !excludes.is_match(name))?;
+        // Matches the naming the non-VCS path produces (`push_source_path`
+        // called with the whole directory as its root): no leading directory
+        // name, just the path relative to it.
+        let archive_name = utf8_path
+            .strip_prefix(dir)
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .to_string();
+
+        if excludes.is_match(&archive_name) {
+            continue;
+        }
+
+        let archive_entry = ArchiveEntry::from_path(utf8_path, archive_name);
+        let file = fs_err::File::open(utf8_path)?;
+        writer.push_archive_entry(archive_entry, Some(file))?;
     }
     Ok(())
 }
