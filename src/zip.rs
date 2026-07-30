@@ -356,7 +356,35 @@ fn resolve_destination(
     // Apply rename rules and optional prefix.
     match filter::apply_path_rewrites(dest_path, &opts.renames, opts.prefix.as_deref())? {
         p if p.as_str().is_empty() => Ok(None),
-        p => Ok(Some(p)),
+        p => Ok(canonicalize_dest(&p)),
+    }
+}
+
+/// Rebuild a destination path from its `Normal` components only, dropping any
+/// `CurDir` (`.`) components in the process.
+///
+/// `plan_destinations` uses the return value both as the write path and as
+/// the `BTreeMap` grouping key, so this must be the canonical form: without
+/// it, `./f.bin` and `f.bin` compare as different keys — even though
+/// `output.join()` sends both to the same file — and the two groups can be
+/// handed to different rayon workers, which then race to write the same
+/// path.  `safe_entry_path` has already rejected `..` and absolute paths, so
+/// only `CurDir` and `Normal` components can remain here. Rebuilding through
+/// `push` (rather than keeping the original string) also drops any trailing
+/// slash a directory entry's name carried, so `d/` and `d` collapse to the
+/// identical path string rather than one of them still ending in `/` and
+/// tripping `File::create` with "Is a directory".
+fn canonicalize_dest(path: &Utf8Path) -> Option<Utf8PathBuf> {
+    let mut out = Utf8PathBuf::new();
+    for component in path.components() {
+        if let camino::Utf8Component::Normal(part) = component {
+            out.push(part);
+        }
+    }
+    if out.as_str().is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
