@@ -64,7 +64,9 @@ pub fn compress_to_writer<W: std::io::Write>(
     filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let encoder = builder.into_inner()?;
-    encoder.finish()?;
+    let buf = encoder.finish()?;
+    let mut writer = buf.into_inner().map_err(std::io::Error::from)?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -83,7 +85,8 @@ pub fn compress_to_writer<W: std::io::Write>(
     filter::append_inputs(&mut builder, &inputs, opts)?;
 
     let encoder = builder.into_inner()?;
-    encoder.finish()?;
+    let mut writer = encoder.finish()?;
+    writer.flush()?;
     Ok(())
 }
 

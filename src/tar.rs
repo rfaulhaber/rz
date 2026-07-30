@@ -40,7 +40,9 @@ pub fn compress_to_writer<W: std::io::Write>(
 
     filter::append_inputs(&mut builder, &inputs, opts)?;
 
-    builder.into_inner()?;
+    let buf = builder.into_inner()?;
+    let mut writer = buf.into_inner().map_err(std::io::Error::from)?;
+    writer.flush()?;
     Ok(())
 }
 

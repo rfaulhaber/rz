@@ -396,6 +396,10 @@ fn run(cli: Cli) -> Result<()> {
                     Format::TarBz2 => tar_bz2::compress_to_writer(&input, stdout, &opts)?,
                     _ => return Err(Error::StdoutNotSupported(fmt.to_string())),
                 }
+                // The lock above was moved into the writer; re-acquire it to force
+                // out anything still sitting in Stdout's own buffer and surface a
+                // late write failure (e.g. a full disk) instead of exiting 0.
+                std::io::stdout().lock().flush()?;
             } else {
                 let output = match output {
                     Some(o) => o,
