@@ -38,7 +38,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     let inputs = filter::validate_inputs(inputs, opts)?;
 
     let file = fs_err::File::create(output)?;
-    let mut zip = ZipWriter::new(file);
+    let mut zip = ZipWriter::new(std::io::BufWriter::new(file));
 
     let base_options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -94,7 +94,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
         }
     }
 
-    let file = zip.finish()?;
+    let file = zip.finish()?.into_inner().map_err(|e| e.into_error())?;
     file.sync_all()?;
     Ok(())
 }
@@ -102,7 +102,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
 /// Walk a directory using [`filter::walk_dir`] and add entries to a zip archive.
 /// Handles symlinks, regular files, and subdirectories.
 fn add_dir_walked<'k>(
-    zip: &mut ZipWriter<fs_err::File>,
+    zip: &mut ZipWriter<std::io::BufWriter<fs_err::File>>,
     dir: &Utf8Path,
     prefix: &str,
     options: zip::write::FileOptions<'k, ()>,
@@ -143,7 +143,7 @@ fn add_dir_walked<'k>(
 /// permissions by default; Windows unzip tools may materialise this as a
 /// regular text file containing the target path.
 fn write_symlink_entry<'k>(
-    zip: &mut ZipWriter<fs_err::File>,
+    zip: &mut ZipWriter<std::io::BufWriter<fs_err::File>>,
     link_path: &Utf8Path,
     archive_name: &str,
     options: zip::write::FileOptions<'k, ()>,
