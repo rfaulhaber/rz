@@ -335,7 +335,10 @@ mod tests {
         let data = b"payload".repeat(100);
         let mut writer = FailingWriter;
         let result = parallel_zst_compress(&data, &mut writer, CompressionLevel::Fastest);
-        assert!(result.is_err(), "write error must propagate as Err, not panic");
+        assert!(
+            result.is_err(),
+            "write error must propagate as Err, not panic"
+        );
     }
 
     /// Compress `data` as a single zstd frame using the same encoder the

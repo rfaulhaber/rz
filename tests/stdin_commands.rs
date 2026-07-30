@@ -91,7 +91,11 @@ fn decompress_bare_stdin_extracts() -> TestResult {
     let tree = tmp.join("tree");
     build_file_tree(&tree)?;
     let archive = tmp.join("payload.tar.gz");
-    (TAR_GZ.compress)(std::slice::from_ref(&tree), &archive, &default_compress_opts(None))?;
+    (TAR_GZ.compress)(
+        std::slice::from_ref(&tree),
+        &archive,
+        &default_compress_opts(None),
+    )?;
     let bytes = fs_err::read(&archive)?;
 
     let out_dir = tmp.join("out");

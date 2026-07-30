@@ -56,7 +56,10 @@ fn tar_gz_info_from_stdin_matches_file() -> TestResult {
     // Stdin-based info — should produce byte-identical JSON, since stdin's
     // tallied compressed size equals the file's on-disk size.
     let archive_bytes = fs_err::read(&archive)?;
-    let from_stdin = run_with_stdin(&["info", "-", "--format", "tar-gz", "--json"], &archive_bytes)?;
+    let from_stdin = run_with_stdin(
+        &["info", "-", "--format", "tar-gz", "--json"],
+        &archive_bytes,
+    )?;
     assert!(
         from_stdin.status.success(),
         "stdin info failed: {}",

@@ -153,7 +153,10 @@ fn prefix_and_rename_are_applied() -> TestResult {
         fs_err::read(out.join("restore").join("v2").join("bar.txt"))?,
         b"foo-content",
     );
-    assert!(!out.join("foo.txt").exists(), "unrewritten path was written");
+    assert!(
+        !out.join("foo.txt").exists(),
+        "unrewritten path was written"
+    );
     Ok(())
 }
 

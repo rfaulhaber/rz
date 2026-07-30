@@ -122,7 +122,10 @@ fn zip64_symlink_lying_about_its_size_does_not_abort() -> TestResult {
 
     let link = out.join("link");
     let meta = fs_err::symlink_metadata(&link)?;
-    assert!(meta.file_type().is_symlink(), "expected a symlink at {link}");
+    assert!(
+        meta.file_type().is_symlink(),
+        "expected a symlink at {link}"
+    );
     assert_eq!(fs_err::read_link(&link)?.to_string_lossy(), "target");
     Ok(())
 }

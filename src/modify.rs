@@ -90,7 +90,12 @@ pub fn append(
     }
 }
 
-pub fn remove(archive: &Utf8Path, fmt: Format, patterns: &[String], level: Option<u32>) -> Result<()> {
+pub fn remove(
+    archive: &Utf8Path,
+    fmt: Format,
+    patterns: &[String],
+    level: Option<u32>,
+) -> Result<()> {
     let glob = filter::build_glob_set(patterns)?;
     match fmt {
         Format::Tar => tar_remove(archive, &glob),
@@ -420,8 +425,11 @@ trait EncoderHandle {
     /// entries via [`Self::append`].
     ///
     /// `keep` returns `true` when the entry should be carried over.
-    fn copy_existing(&mut self, reader: &mut dyn Read, keep: &mut dyn FnMut(&str) -> bool)
-    -> Result<HashMap<String, u64>>;
+    fn copy_existing(
+        &mut self,
+        reader: &mut dyn Read,
+        keep: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<HashMap<String, u64>>;
     fn append_inputs(
         &mut self,
         inputs: &[Utf8PathBuf],
@@ -903,7 +911,10 @@ fn zip_add_dir(
         if !should_add_zip_entry(&entry.archive_name, &meta, archive_idx) {
             return Ok(());
         }
-        zw.start_file(&entry.archive_name, crate::zip::with_unix_mode(options, &meta))?;
+        zw.start_file(
+            &entry.archive_name,
+            crate::zip::with_unix_mode(options, &meta),
+        )?;
         let mut f = fs_err::File::open(&entry.fs_path)?;
         let size = std::io::copy(&mut f, zw)?;
         opts.progress.set_entry(&entry.archive_name);

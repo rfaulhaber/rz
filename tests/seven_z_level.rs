@@ -36,11 +36,19 @@ fn seven_z_store_is_much_larger_than_compressed() -> TestResult {
 
     // Level 0 == --store: COPY (no compression).
     let stored = tmp.join("stored.7z");
-    seven_z::compress(std::slice::from_ref(&payload), &stored, &compress_opts(Some(0)))?;
+    seven_z::compress(
+        std::slice::from_ref(&payload),
+        &stored,
+        &compress_opts(Some(0)),
+    )?;
 
     // Default: LZMA2.
     let compressed = tmp.join("compressed.7z");
-    seven_z::compress(std::slice::from_ref(&payload), &compressed, &compress_opts(None))?;
+    seven_z::compress(
+        std::slice::from_ref(&payload),
+        &compressed,
+        &compress_opts(None),
+    )?;
 
     let stored_size = fs_err::metadata(&stored)?.len();
     let compressed_size = fs_err::metadata(&compressed)?.len();
@@ -61,13 +69,20 @@ fn round_trips_at_level(level: Option<u32>) -> TestResult {
     let payload = write_payload(&tmp)?;
 
     let archive = tmp.join("ar.7z");
-    seven_z::compress(std::slice::from_ref(&payload), &archive, &compress_opts(level))?;
+    seven_z::compress(
+        std::slice::from_ref(&payload),
+        &archive,
+        &compress_opts(level),
+    )?;
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
     seven_z::decompress(&archive, &out, &decompress_opts())?;
 
-    assert_eq!(fs_err::read(out.join("payload.txt"))?, fs_err::read(&payload)?);
+    assert_eq!(
+        fs_err::read(out.join("payload.txt"))?,
+        fs_err::read(&payload)?
+    );
     Ok(())
 }
 

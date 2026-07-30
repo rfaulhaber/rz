@@ -478,14 +478,11 @@ pub fn extract_tar_to_writer<R: std::io::Read, W: std::io::Write>(
         };
 
         // Apply rename rules and optional prefix for consistent naming.
-        let display_path = match apply_path_rewrites(
-            after_no_dir,
-            &opts.renames,
-            opts.prefix.as_deref(),
-        )? {
-            p if p.as_str().is_empty() => continue,
-            p => p,
-        };
+        let display_path =
+            match apply_path_rewrites(after_no_dir, &opts.renames, opts.prefix.as_deref())? {
+                p if p.as_str().is_empty() => continue,
+                p => p,
+            };
 
         opts.progress.set_entry(display_path.as_str());
         let written = std::io::copy(&mut entry, writer)?;

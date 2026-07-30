@@ -231,10 +231,20 @@ fn cli_convert_parses_to_format() -> TestResult {
 #[test]
 fn cli_convert_parses_force_and_level() -> TestResult {
     let cli = Cli::try_parse_from([
-        "rz_archive", "convert", "a.tar.gz", "-o", "b.tar.zst", "-F", "-l", "3",
+        "rz_archive",
+        "convert",
+        "a.tar.gz",
+        "-o",
+        "b.tar.zst",
+        "-F",
+        "-l",
+        "3",
     ])?;
     if let rz_archive::cmd::Command::Convert {
-        force, level, output, ..
+        force,
+        level,
+        output,
+        ..
     } = cli.command
     {
         assert!(force);
@@ -286,8 +296,9 @@ fn run_convert_fn(
     for entry in fs_err::read_dir(&tmp_dir)? {
         let entry = entry?;
         let p = entry.path();
-        let utf8 = Utf8PathBuf::try_from(p)
-            .map_err(|e| rz_archive::error::Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+        let utf8 = Utf8PathBuf::try_from(p).map_err(|e| {
+            rz_archive::error::Error::InvalidUtf8Path(e.into_path_buf().display().to_string())
+        })?;
         children.push(utf8);
     }
 
@@ -324,9 +335,7 @@ fn derive_convert_output_test(
     let stem = {
         let mut s = name;
         for ext in fmt_in.recognized_extensions() {
-            if s.len() >= ext.len()
-                && s[s.len() - ext.len()..].eq_ignore_ascii_case(ext)
-            {
+            if s.len() >= ext.len() && s[s.len() - ext.len()..].eq_ignore_ascii_case(ext) {
                 s = &s[..s.len() - ext.len()];
                 break;
             }

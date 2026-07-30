@@ -94,7 +94,10 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
         return Err(Error::KeepNewerUnsupported("7z".to_owned()));
     }
     let file = fs_err::File::open(input)?;
-    let password = opts.password.as_deref().map_or_else(Password::empty, Password::from);
+    let password = opts
+        .password
+        .as_deref()
+        .map_or_else(Password::empty, Password::from);
 
     // sevenz-rust2's error type cannot carry one of ours, and forcing ours
     // through `io::Error` would relabel every failure as an I/O error, so the
@@ -230,34 +233,43 @@ pub fn decompress_to_writer<W: std::io::Write>(
         return Err(Error::StripComponentsUnsupported("7z".to_owned()));
     }
     let file = fs_err::File::open(input)?;
-    let password = opts.password.as_deref().map(Password::from).unwrap_or_else(Password::empty);
-    sevenz_rust2::decompress_with_extract_fn_and_password(file, ".", password, |entry, reader, _dest| {
-        // Reject entries that attempt path traversal.
-        crate::filter::safe_entry_path(&entry.name).map_err(|e| {
-            sevenz_rust2::Error::Io(
-                std::io::Error::other(e.to_string()),
-                entry.name.clone().into(),
-            )
-        })?;
+    let password = opts
+        .password
+        .as_deref()
+        .map(Password::from)
+        .unwrap_or_else(Password::empty);
+    sevenz_rust2::decompress_with_extract_fn_and_password(
+        file,
+        ".",
+        password,
+        |entry, reader, _dest| {
+            // Reject entries that attempt path traversal.
+            crate::filter::safe_entry_path(&entry.name).map_err(|e| {
+                sevenz_rust2::Error::Io(
+                    std::io::Error::other(e.to_string()),
+                    entry.name.clone().into(),
+                )
+            })?;
 
-        if entry.is_directory {
-            return Ok(true);
-        }
-        if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
-            return Ok(true);
-        }
-        if opts.no_directory {
-            let display_name = Utf8Path::new(&entry.name)
-                .file_name()
-                .unwrap_or(&entry.name);
-            opts.progress.set_entry(display_name);
-        } else {
-            opts.progress.set_entry(&entry.name);
-        }
-        std::io::copy(reader, writer)
-            .map_err(|e| sevenz_rust2::Error::Io(e, "decompress to writer".into()))?;
-        Ok(true) // skip default extraction
-    })?;
+            if entry.is_directory {
+                return Ok(true);
+            }
+            if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
+                return Ok(true);
+            }
+            if opts.no_directory {
+                let display_name = Utf8Path::new(&entry.name)
+                    .file_name()
+                    .unwrap_or(&entry.name);
+                opts.progress.set_entry(display_name);
+            } else {
+                opts.progress.set_entry(&entry.name);
+            }
+            std::io::copy(reader, writer)
+                .map_err(|e| sevenz_rust2::Error::Io(e, "decompress to writer".into()))?;
+            Ok(true) // skip default extraction
+        },
+    )?;
     Ok(())
 }
 
@@ -270,13 +282,18 @@ pub fn test(
 ) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let pwd = password.map_or_else(Password::empty, Password::from);
-    sevenz_rust2::decompress_with_extract_fn_and_password(file, ".", pwd, |entry, reader, _dest| {
-        progress.set_entry(&entry.name);
-        let written = std::io::copy(reader, &mut std::io::sink())
-            .map_err(|e| sevenz_rust2::Error::Io(e, "test: reading entry".into()))?;
-        progress.inc(written);
-        Ok(true) // skip default extraction
-    })?;
+    sevenz_rust2::decompress_with_extract_fn_and_password(
+        file,
+        ".",
+        pwd,
+        |entry, reader, _dest| {
+            progress.set_entry(&entry.name);
+            let written = std::io::copy(reader, &mut std::io::sink())
+                .map_err(|e| sevenz_rust2::Error::Io(e, "test: reading entry".into()))?;
+            progress.inc(written);
+            Ok(true) // skip default extraction
+        },
+    )?;
     Ok(())
 }
 

@@ -621,13 +621,19 @@ mod tests {
     #[test]
     fn prefix_rejects_parent_traversal_at_parse_time() {
         let res = Cli::try_parse_from(["rz", "decompress", "a.tar", "--prefix", "../escape"]);
-        assert!(res.is_err(), "--prefix with `..` must be rejected during parsing");
+        assert!(
+            res.is_err(),
+            "--prefix with `..` must be rejected during parsing"
+        );
     }
 
     #[test]
     fn prefix_rejects_absolute_at_parse_time() {
         let res = Cli::try_parse_from(["rz", "decompress", "a.tar", "--prefix", "/abs"]);
-        assert!(res.is_err(), "an absolute --prefix must be rejected during parsing");
+        assert!(
+            res.is_err(),
+            "an absolute --prefix must be rejected during parsing"
+        );
     }
 
     #[test]

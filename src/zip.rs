@@ -137,7 +137,6 @@ fn add_dir_walked<'k>(
     })
 }
 
-
 /// Store a symlink as a symlink entry (POSIX-style, with `S_IFLNK` mode and
 /// the link target as the entry content). The `zip` crate sets `0o777`
 /// permissions by default; Windows unzip tools may materialise this as a
@@ -158,7 +157,6 @@ fn write_symlink_entry<'k>(
     opts.progress.inc(target_str.len() as u64);
     Ok(())
 }
-
 
 /// Upper bound on a symlink target this crate is willing to read.
 ///
@@ -194,7 +192,10 @@ fn extract_symlink_entry(
     // `handle_alloc_error`, which aborts rather than unwinding — no amount of
     // panic-free discipline in this crate can catch that.
     let mut target_bytes = Vec::new();
-    let read = io::copy(&mut io::Read::take(entry, MAX_SYMLINK_TARGET), &mut target_bytes)?;
+    let read = io::copy(
+        &mut io::Read::take(entry, MAX_SYMLINK_TARGET),
+        &mut target_bytes,
+    )?;
     if read >= MAX_SYMLINK_TARGET {
         return Err(Error::SymlinkTargetTooLong {
             path: dest_path.to_owned(),
@@ -379,14 +380,11 @@ pub fn decompress_to_writer<W: std::io::Write>(
         }
 
         // Apply rename rules and optional prefix.
-        let display_path = match filter::apply_path_rewrites(
-            stripped,
-            &opts.renames,
-            opts.prefix.as_deref(),
-        )? {
-            p if p.as_str().is_empty() => continue,
-            p => p,
-        };
+        let display_path =
+            match filter::apply_path_rewrites(stripped, &opts.renames, opts.prefix.as_deref())? {
+                p if p.as_str().is_empty() => continue,
+                p => p,
+            };
 
         opts.progress.set_entry(display_path.as_str());
         io::copy(&mut entry, writer)?;

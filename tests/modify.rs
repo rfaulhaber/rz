@@ -61,7 +61,11 @@ fn list_names(archive: &Utf8Path, fmt: Format) -> RzResult<Vec<String>> {
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => rz_archive::tar_bz2::list(archive)?,
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => return Err(rz_archive::error::Error::UnsupportedFormat("tar.bz2".into())),
+        Format::TarBz2 => {
+            return Err(rz_archive::error::Error::UnsupportedFormat(
+                "tar.bz2".into(),
+            ));
+        }
         Format::Zip => rz_archive::zip::list(archive)?,
         Format::SevenZ => rz_archive::seven_z::list(archive)?,
     };
@@ -80,7 +84,9 @@ fn compress(archive: &Utf8Path, fmt: Format, inputs: &[Utf8PathBuf]) -> RzResult
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => rz_archive::tar_bz2::compress(inputs, archive, &opts),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(rz_archive::error::Error::UnsupportedFormat("tar.bz2".into())),
+        Format::TarBz2 => Err(rz_archive::error::Error::UnsupportedFormat(
+            "tar.bz2".into(),
+        )),
         Format::Zip => rz_archive::zip::compress(inputs, archive, &opts),
         Format::SevenZ => rz_archive::seven_z::compress(inputs, archive, &opts),
     }
@@ -105,7 +111,9 @@ fn decompress_with(
         #[cfg(feature = "bzip2")]
         Format::TarBz2 => rz_archive::tar_bz2::decompress(archive, out, opts),
         #[cfg(not(feature = "bzip2"))]
-        Format::TarBz2 => Err(rz_archive::error::Error::UnsupportedFormat("tar.bz2".into())),
+        Format::TarBz2 => Err(rz_archive::error::Error::UnsupportedFormat(
+            "tar.bz2".into(),
+        )),
         Format::Zip => rz_archive::zip::decompress(archive, out, opts),
         Format::SevenZ => rz_archive::seven_z::decompress(archive, out, opts),
     }
@@ -120,11 +128,23 @@ fn append_then_list(fmt: Format, ext: &str) -> TestResult {
 
     let b = write_file(&tmp, "b.txt", b"bravo\n")?;
     let opts = default_compress_opts(None);
-    modify::append(&archive, fmt, std::slice::from_ref(&b), AppendMode::Append, &opts)?;
+    modify::append(
+        &archive,
+        fmt,
+        std::slice::from_ref(&b),
+        AppendMode::Append,
+        &opts,
+    )?;
 
     let names = list_names(&archive, fmt)?;
-    assert!(names.iter().any(|n| n.ends_with("a.txt")), "missing a.txt: {names:?}");
-    assert!(names.iter().any(|n| n.ends_with("b.txt")), "missing b.txt: {names:?}");
+    assert!(
+        names.iter().any(|n| n.ends_with("a.txt")),
+        "missing a.txt: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.ends_with("b.txt")),
+        "missing b.txt: {names:?}"
+    );
     Ok(())
 }
 
@@ -139,7 +159,13 @@ fn append_then_decompress(fmt: Format, ext: &str, preserves_top_dir: bool) -> Te
 
     let b = write_file(&tmp, "b.txt", b"bravo\n")?;
     let opts = default_compress_opts(None);
-    modify::append(&archive, fmt, std::slice::from_ref(&b), AppendMode::Append, &opts)?;
+    modify::append(
+        &archive,
+        fmt,
+        std::slice::from_ref(&b),
+        AppendMode::Append,
+        &opts,
+    )?;
 
     let out = tmp.join("out");
     if preserves_top_dir {
@@ -167,12 +193,21 @@ fn update_skips_unchanged_writes_newer(fmt: Format, ext: &str) -> TestResult {
 
     let baseline = list_names(&archive, fmt)?;
     let baseline_count = baseline.iter().filter(|n| n.ends_with("a.txt")).count();
-    assert_eq!(baseline_count, 1, "baseline must have exactly one a.txt: {baseline:?}");
+    assert_eq!(
+        baseline_count, 1,
+        "baseline must have exactly one a.txt: {baseline:?}"
+    );
 
     let opts = default_compress_opts(None);
 
     // Update with no mtime change → must skip.
-    modify::append(&archive, fmt, std::slice::from_ref(&a), AppendMode::Update, &opts)?;
+    modify::append(
+        &archive,
+        fmt,
+        std::slice::from_ref(&a),
+        AppendMode::Update,
+        &opts,
+    )?;
     let after_skip = list_names(&archive, fmt)?;
     assert_eq!(
         after_skip.iter().filter(|n| n.ends_with("a.txt")).count(),
@@ -184,7 +219,13 @@ fn update_skips_unchanged_writes_newer(fmt: Format, ext: &str) -> TestResult {
     // and rewriting. Now update should append.
     thread::sleep(Duration::from_millis(1100));
     fs_err::write(&a, b"alpha v2\n")?;
-    modify::append(&archive, fmt, std::slice::from_ref(&a), AppendMode::Update, &opts)?;
+    modify::append(
+        &archive,
+        fmt,
+        std::slice::from_ref(&a),
+        AppendMode::Update,
+        &opts,
+    )?;
 
     let after_update = list_names(&archive, fmt)?;
     let count_after = after_update.iter().filter(|n| n.ends_with("a.txt")).count();
@@ -206,7 +247,10 @@ fn update_skips_unchanged_writes_newer(fmt: Format, ext: &str) -> TestResult {
     };
     decompress_with(&archive, fmt, &out, &dec_opts)?;
     let extracted = fs_err::read(out.join("a.txt"))?;
-    assert_eq!(extracted, b"alpha v2\n", "extracted contents must reflect the update");
+    assert_eq!(
+        extracted, b"alpha v2\n",
+        "extracted contents must reflect the update"
+    );
 
     Ok(())
 }
@@ -222,25 +266,61 @@ fn remove_drops_matching(fmt: Format, ext: &str) -> TestResult {
     modify::remove(&archive, fmt, &["a.txt".into()], None)?;
 
     let names = list_names(&archive, fmt)?;
-    assert!(!names.iter().any(|n| n.ends_with("a.txt")), "a.txt should be gone: {names:?}");
-    assert!(names.iter().any(|n| n.ends_with("b.txt")), "b.txt should remain: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.ends_with("a.txt")),
+        "a.txt should be gone: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.ends_with("b.txt")),
+        "b.txt should remain: {names:?}"
+    );
     Ok(())
 }
 
 // ── format-by-format invocations ─────────────────────────────────────────────
 
-#[test] fn tar_append_then_list() -> TestResult { append_then_list(Format::Tar, ".tar") }
-#[test] fn tar_append_then_decompress() -> TestResult { append_then_decompress(Format::Tar, ".tar", true) }
-#[test] fn tar_update_skips_unchanged_writes_newer() -> TestResult { update_skips_unchanged_writes_newer(Format::Tar, ".tar") }
-#[test] fn tar_remove_drops_matching() -> TestResult { remove_drops_matching(Format::Tar, ".tar") }
+#[test]
+fn tar_append_then_list() -> TestResult {
+    append_then_list(Format::Tar, ".tar")
+}
+#[test]
+fn tar_append_then_decompress() -> TestResult {
+    append_then_decompress(Format::Tar, ".tar", true)
+}
+#[test]
+fn tar_update_skips_unchanged_writes_newer() -> TestResult {
+    update_skips_unchanged_writes_newer(Format::Tar, ".tar")
+}
+#[test]
+fn tar_remove_drops_matching() -> TestResult {
+    remove_drops_matching(Format::Tar, ".tar")
+}
 
-#[test] fn tar_gz_append_then_list() -> TestResult { append_then_list(Format::TarGz, ".tar.gz") }
-#[test] fn tar_gz_append_then_decompress() -> TestResult { append_then_decompress(Format::TarGz, ".tar.gz", true) }
-#[test] fn tar_gz_remove_drops_matching() -> TestResult { remove_drops_matching(Format::TarGz, ".tar.gz") }
+#[test]
+fn tar_gz_append_then_list() -> TestResult {
+    append_then_list(Format::TarGz, ".tar.gz")
+}
+#[test]
+fn tar_gz_append_then_decompress() -> TestResult {
+    append_then_decompress(Format::TarGz, ".tar.gz", true)
+}
+#[test]
+fn tar_gz_remove_drops_matching() -> TestResult {
+    remove_drops_matching(Format::TarGz, ".tar.gz")
+}
 
-#[test] fn tar_zst_append_then_list() -> TestResult { append_then_list(Format::TarZst, ".tar.zst") }
-#[test] fn tar_zst_append_then_decompress() -> TestResult { append_then_decompress(Format::TarZst, ".tar.zst", true) }
-#[test] fn tar_zst_remove_drops_matching() -> TestResult { remove_drops_matching(Format::TarZst, ".tar.zst") }
+#[test]
+fn tar_zst_append_then_list() -> TestResult {
+    append_then_list(Format::TarZst, ".tar.zst")
+}
+#[test]
+fn tar_zst_append_then_decompress() -> TestResult {
+    append_then_decompress(Format::TarZst, ".tar.zst", true)
+}
+#[test]
+fn tar_zst_remove_drops_matching() -> TestResult {
+    remove_drops_matching(Format::TarZst, ".tar.zst")
+}
 
 // Regression: `tar_zst::compress` emits one independent zstd frame per 1 MiB of
 // tar payload, and the modify read-rewrite must decode *all* of them.  A
@@ -262,7 +342,13 @@ fn tar_zst_multiframe_append_preserves_all_entries() -> TestResult {
 
     let b = write_file(&tmp, "b.txt", b"appended\n")?;
     let opts = default_compress_opts(None);
-    modify::append(&archive, Format::TarZst, std::slice::from_ref(&b), AppendMode::Append, &opts)?;
+    modify::append(
+        &archive,
+        Format::TarZst,
+        std::slice::from_ref(&b),
+        AppendMode::Append,
+        &opts,
+    )?;
 
     let out = tmp.join("out");
     fs_err::create_dir(&out)?;
@@ -290,10 +376,16 @@ fn tar_zst_multiframe_remove_preserves_survivors() -> TestResult {
     modify::remove(&archive, Format::TarZst, &["f000.dat".into()], None)?;
 
     let names = list_names(&archive, Format::TarZst)?;
-    assert!(!names.iter().any(|n| n.ends_with("f000.dat")), "f000.dat should be gone: {names:?}");
+    assert!(
+        !names.iter().any(|n| n.ends_with("f000.dat")),
+        "f000.dat should be gone: {names:?}"
+    );
     for i in 1..4 {
         let want = format!("f{i:03}.dat");
-        assert!(names.iter().any(|n| n.ends_with(&want)), "missing {want}: {names:?}");
+        assert!(
+            names.iter().any(|n| n.ends_with(&want)),
+            "missing {want}: {names:?}"
+        );
     }
 
     let out = tmp.join("out");
@@ -310,18 +402,42 @@ fn tar_zst_multiframe_remove_preserves_survivors() -> TestResult {
     Ok(())
 }
 
-#[test] fn tar_xz_append_then_list() -> TestResult { append_then_list(Format::TarXz, ".tar.xz") }
-#[test] fn tar_xz_append_then_decompress() -> TestResult { append_then_decompress(Format::TarXz, ".tar.xz", true) }
-#[test] fn tar_xz_remove_drops_matching() -> TestResult { remove_drops_matching(Format::TarXz, ".tar.xz") }
+#[test]
+fn tar_xz_append_then_list() -> TestResult {
+    append_then_list(Format::TarXz, ".tar.xz")
+}
+#[test]
+fn tar_xz_append_then_decompress() -> TestResult {
+    append_then_decompress(Format::TarXz, ".tar.xz", true)
+}
+#[test]
+fn tar_xz_remove_drops_matching() -> TestResult {
+    remove_drops_matching(Format::TarXz, ".tar.xz")
+}
 
 #[cfg(feature = "bzip2")]
-#[test] fn tar_bz2_append_then_decompress() -> TestResult { append_then_decompress(Format::TarBz2, ".tar.bz2", true) }
+#[test]
+fn tar_bz2_append_then_decompress() -> TestResult {
+    append_then_decompress(Format::TarBz2, ".tar.bz2", true)
+}
 #[cfg(feature = "bzip2")]
-#[test] fn tar_bz2_remove_drops_matching() -> TestResult { remove_drops_matching(Format::TarBz2, ".tar.bz2") }
+#[test]
+fn tar_bz2_remove_drops_matching() -> TestResult {
+    remove_drops_matching(Format::TarBz2, ".tar.bz2")
+}
 
-#[test] fn zip_append_then_list() -> TestResult { append_then_list(Format::Zip, ".zip") }
-#[test] fn zip_append_then_decompress() -> TestResult { append_then_decompress(Format::Zip, ".zip", true) }
-#[test] fn zip_remove_drops_matching() -> TestResult { remove_drops_matching(Format::Zip, ".zip") }
+#[test]
+fn zip_append_then_list() -> TestResult {
+    append_then_list(Format::Zip, ".zip")
+}
+#[test]
+fn zip_append_then_decompress() -> TestResult {
+    append_then_decompress(Format::Zip, ".zip", true)
+}
+#[test]
+fn zip_remove_drops_matching() -> TestResult {
+    remove_drops_matching(Format::Zip, ".zip")
+}
 
 // ── error paths ──────────────────────────────────────────────────────────────
 
@@ -334,7 +450,10 @@ fn seven_z_append_unsupported() -> TestResult {
 
     let opts = default_compress_opts(None);
     let err = modify::append(&archive, Format::SevenZ, &[a], AppendMode::Append, &opts);
-    assert!(matches!(err, Err(rz_archive::error::Error::ModifyUnsupported { .. })));
+    assert!(matches!(
+        err,
+        Err(rz_archive::error::Error::ModifyUnsupported { .. })
+    ));
     Ok(())
 }
 
@@ -346,7 +465,10 @@ fn seven_z_remove_unsupported() -> TestResult {
     compress(&archive, Format::SevenZ, &[a])?;
 
     let err = modify::remove(&archive, Format::SevenZ, &["a.txt".into()], None);
-    assert!(matches!(err, Err(rz_archive::error::Error::ModifyUnsupported { .. })));
+    assert!(matches!(
+        err,
+        Err(rz_archive::error::Error::ModifyUnsupported { .. })
+    ));
     Ok(())
 }
 
@@ -363,11 +485,24 @@ fn tar_append_archive_ends_with_eof_terminator() -> TestResult {
 
     let b = write_file(&tmp, "b.txt", b"bravo\n")?;
     let opts = default_compress_opts(None);
-    modify::append(&archive, Format::Tar, std::slice::from_ref(&b), AppendMode::Append, &opts)?;
+    modify::append(
+        &archive,
+        Format::Tar,
+        std::slice::from_ref(&b),
+        AppendMode::Append,
+        &opts,
+    )?;
 
     let bytes = fs_err::read(&archive)?;
-    assert_eq!(bytes.len() % 512, 0, "tar archive must be a multiple of 512 bytes");
+    assert_eq!(
+        bytes.len() % 512,
+        0,
+        "tar archive must be a multiple of 512 bytes"
+    );
     let tail = &bytes[bytes.len().saturating_sub(1024)..];
-    assert!(tail.iter().all(|b| *b == 0), "tar archive must end with two zero blocks");
+    assert!(
+        tail.iter().all(|b| *b == 0),
+        "tar archive must end with two zero blocks"
+    );
     Ok(())
 }

@@ -88,7 +88,11 @@ fn one_top_level_rejects_stdin_input() -> TestResult {
         stdin.write_all(&archive_bytes)?;
     }
     let out = child.wait_with_output()?;
-    assert!(!out.status.success(), "expected failure, got {}", out.status);
+    assert!(
+        !out.status.success(),
+        "expected failure, got {}",
+        out.status
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("--one-top-level"),

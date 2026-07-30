@@ -8,10 +8,10 @@ use rz_archive::cmd::{Cli, Command, Format, PasswordArgs, SortField};
 use rz_archive::error::{Error, Result};
 use rz_archive::filter;
 use rz_archive::format::{resolve_compress_format, resolve_input_format};
+use rz_archive::modify::{self, AppendMode};
 use rz_archive::progress::{BarProgress, NoProgress, ProgressReport, VerboseReport};
 #[cfg(feature = "bzip2")]
 use rz_archive::tar_bz2;
-use rz_archive::modify::{self, AppendMode};
 use rz_archive::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar_zst, zip};
 
 /// Resolve a password from any of the three password-source flags.
@@ -23,9 +23,7 @@ use rz_archive::{CompressOpts, DecompressOpts, seven_z, tar, tar_gz, tar_xz, tar
 fn resolve_password(args: &PasswordArgs) -> Result<Option<String>> {
     if args.password_stdin {
         let mut buf = String::new();
-        std::io::stdin()
-            .read_line(&mut buf)
-            .map_err(Error::Io)?;
+        std::io::stdin().read_line(&mut buf).map_err(Error::Io)?;
         // Strip one trailing \r\n or \n.
         if buf.ends_with('\n') {
             buf.pop();
@@ -217,7 +215,10 @@ fn info_from_stdin(
 }
 
 /// List archive entries from stdin.
-fn list_from_stdin(format: Option<Format>, password: &Option<String>) -> Result<Vec<rz_archive::Entry>> {
+fn list_from_stdin(
+    format: Option<Format>,
+    password: &Option<String>,
+) -> Result<Vec<rz_archive::Entry>> {
     let (fmt, reader) = resolve_stdin_source(format)?;
     reject_encryption_for_non_supported(&fmt, password)?;
     let entries = match fmt {
@@ -619,7 +620,9 @@ fn run(cli: Cli) -> Result<()> {
                 if from_stdin {
                     let reader = stdin_reader.take().ok_or(Error::NoInput)?;
                     match fmt {
-                        Format::Tar => tar::decompress_reader_to_writer(reader, &mut stdout, &opts)?,
+                        Format::Tar => {
+                            tar::decompress_reader_to_writer(reader, &mut stdout, &opts)?
+                        }
                         Format::TarGz => {
                             tar_gz::decompress_reader_to_writer(reader, &mut stdout, &opts)?
                         }
@@ -899,8 +902,16 @@ fn run(cli: Cli) -> Result<()> {
             follow_symlinks,
         } => {
             run_append(
-                cli.progress, cli.verbose, archive, input, format, level, exclude,
-                exclude_from, follow_symlinks, AppendMode::Append,
+                cli.progress,
+                cli.verbose,
+                archive,
+                input,
+                format,
+                level,
+                exclude,
+                exclude_from,
+                follow_symlinks,
+                AppendMode::Append,
             )?;
         }
 
@@ -914,8 +925,16 @@ fn run(cli: Cli) -> Result<()> {
             follow_symlinks,
         } => {
             run_append(
-                cli.progress, cli.verbose, archive, input, format, level, exclude,
-                exclude_from, follow_symlinks, AppendMode::Update,
+                cli.progress,
+                cli.verbose,
+                archive,
+                input,
+                format,
+                level,
+                exclude,
+                exclude_from,
+                follow_symlinks,
+                AppendMode::Update,
             )?;
         }
 
@@ -1024,9 +1043,7 @@ fn derive_convert_output(input: &Utf8Path, fmt_out: Format, fmt_in: Format) -> U
     let stem = {
         let mut s = name;
         for ext in fmt_in.recognized_extensions() {
-            if s.len() >= ext.len()
-                && s[s.len() - ext.len()..].eq_ignore_ascii_case(ext)
-            {
+            if s.len() >= ext.len() && s[s.len() - ext.len()..].eq_ignore_ascii_case(ext) {
                 s = &s[..s.len() - ext.len()];
                 break;
             }
@@ -1127,7 +1144,12 @@ fn run_convert(
         .ok_or_else(|| Error::InvalidUtf8Path(tmp.path().display().to_string()))?
         .to_owned();
 
-    let dec_opts = DecompressOpts::new(true, 0, globset::GlobSet::empty(), globset::GlobSet::empty());
+    let dec_opts = DecompressOpts::new(
+        true,
+        0,
+        globset::GlobSet::empty(),
+        globset::GlobSet::empty(),
+    );
     dispatch_decompress(fmt_in, &input, &tmp_dir, &dec_opts)?;
 
     // Compress from the children of tmp_dir so the archive entries are named

@@ -60,7 +60,9 @@ pub enum Error {
     #[error("no input provided; pass an archive path or pipe an archive into stdin")]
     NoInput,
 
-    #[error("--one-top-level needs a filename to derive the directory from; not supported with stdin input")]
+    #[error(
+        "--one-top-level needs a filename to derive the directory from; not supported with stdin input"
+    )]
     OneTopLevelStdin,
 
     #[error("path traversal detected in archive entry: {0}")]
