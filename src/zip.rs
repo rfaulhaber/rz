@@ -295,6 +295,36 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
         (plan_destinations(&mut archive, opts)?, metadata)
     };
 
+    // A *file* destined for `x` alongside any entry destined for `x/…`
+    // cannot both succeed — either the parent create_dir_all or the file
+    // create must fail.  The parallel plan puts the two paths in different
+    // groups, so they race dir-vs-file creation and fail (or half-succeed)
+    // nondeterministically.  Fall back to strict archive order so the
+    // outcome — including which entry errors — matches a serial run every
+    // time.
+    if has_ancestor_conflict(&groups) {
+        let file = fs_err::File::open(input)?;
+        let mut archive = ZipArchive::new(file)?;
+        let mut jobs: Vec<(usize, Utf8PathBuf)> = groups
+            .into_iter()
+            .flat_map(|(dest, indices, _)| {
+                indices.into_iter().map(move |i| (i, dest.clone()))
+            })
+            .collect();
+        jobs.sort_by_key(|(i, _)| *i);
+        for (index, dest) in jobs {
+            extract_entry(
+                &mut archive,
+                index,
+                &dest,
+                output,
+                opts,
+                opts.password.as_deref(),
+            )?;
+        }
+        return Ok(());
+    }
+
     let password = opts.password.clone();
     groups.into_par_iter().try_for_each_init(
         || -> Option<ZipArchive<fs_err::File>> {
@@ -302,7 +332,7 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             // SAFETY: metadata was parsed from the same file.
             Some(unsafe { ZipArchive::unsafe_new_with_metadata(file, shared_metadata.clone()) })
         },
-        |maybe_archive, (dest_path, indices)| -> Result<()> {
+        |maybe_archive, (dest_path, indices, _)| -> Result<()> {
             let archive = maybe_archive
                 .as_mut()
                 .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
@@ -322,6 +352,23 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     Ok(())
 }
 
+/// Detect a destination that is a strict path ancestor of another destination
+/// while receiving at least one non-directory entry.
+///
+/// Groups arrive sorted by `Utf8PathBuf`'s component-wise order, in which
+/// every descendant of a path sorts directly after it (no sibling can sit
+/// between `x` and `x/y`), so checking consecutive pairs finds an ancestor
+/// pair iff one exists.  Directory-only ancestors (`d/` before `d/f`) are the
+/// normal shape of every archive and stay on the parallel path.
+fn has_ancestor_conflict(groups: &[(Utf8PathBuf, Vec<usize>, bool)]) -> bool {
+    groups.windows(2).any(|w| match w {
+        [(ancestor, _, has_file), (descendant, _, _)] => {
+            *has_file && descendant.starts_with(ancestor)
+        }
+        _ => false,
+    })
+}
+
 /// Resolve every entry's destination up front and bucket the archive indices by
 /// it, keeping each bucket in ascending index order.
 ///
@@ -334,8 +381,10 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
 fn plan_destinations(
     archive: &mut ZipArchive<fs_err::File>,
     opts: &DecompressOpts<'_>,
-) -> Result<Vec<(Utf8PathBuf, Vec<usize>)>> {
-    let mut groups: BTreeMap<Utf8PathBuf, Vec<usize>> = BTreeMap::new();
+) -> Result<Vec<(Utf8PathBuf, Vec<usize>, bool)>> {
+    // Value: (indices, group receives at least one non-directory entry) —
+    // the flag feeds the ancestor-conflict check in `decompress`.
+    let mut groups: BTreeMap<Utf8PathBuf, (Vec<usize>, bool)> = BTreeMap::new();
     for index in 0..archive.len() {
         // Raw access: names and directory-ness come from the central directory,
         // so planning costs no decompression and needs no password.
@@ -345,10 +394,15 @@ fn plan_destinations(
         drop(entry);
 
         if let Some(dest) = resolve_destination(&name, is_dir, opts)? {
-            groups.entry(dest).or_default().push(index);
+            let group = groups.entry(dest).or_default();
+            group.0.push(index);
+            group.1 |= !is_dir;
         }
     }
-    Ok(groups.into_iter().collect())
+    Ok(groups
+        .into_iter()
+        .map(|(dest, (indices, has_file))| (dest, indices, has_file))
+        .collect())
 }
 
 /// Run one entry name through the filter and rewrite chain, yielding its
