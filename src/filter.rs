@@ -560,8 +560,6 @@ fn append_file_entry<W: std::io::Write>(
         let meta = input_metadata(fs_path, opts.follow_symlinks)?;
         let mut header = tar::Header::new_gnu();
         header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
-        // Re-apply the real metadata fields that Deterministic mode zeroes.
-        header.set_size(meta.len());
         header.set_mode(metadata_mode(&meta));
 
         if opts.fixed_mtime.is_none() {
@@ -576,9 +574,30 @@ fn append_file_entry<W: std::io::Write>(
         }
 
         apply_header_overrides(&mut header, opts);
-        header.set_cksum();
-        let mut file = fs_err::File::open(fs_path)?;
-        builder.append_data(&mut header, archive_name, &mut file)?;
+
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            // `set_metadata_in_mode` already leaves the header as
+            // `EntryType::symlink()` with size 0. Reading the target through
+            // `File::open` here would follow the link and stream the target's
+            // contents under this header instead of a link record, shifting
+            // every entry appended afterward and corrupting the archive.
+            let target = fs_err::read_link(fs_path)?;
+            let target = Utf8PathBuf::try_from(target)
+                .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+            header.set_cksum();
+            builder.append_link(&mut header, archive_name, target.as_str())?;
+        } else if file_type.is_file() {
+            header.set_size(meta.len());
+            header.set_cksum();
+            let mut file = fs_err::File::open(fs_path)?;
+            builder.append_data(&mut header, archive_name, &mut file)?;
+        } else {
+            // Fifo/char/block device — no payload, entry type already set by
+            // `set_metadata_in_mode`.
+            header.set_cksum();
+            builder.append_data(&mut header, archive_name, std::io::empty())?;
+        }
     } else {
         builder.append_path_with_name(fs_path, archive_name)?;
     }

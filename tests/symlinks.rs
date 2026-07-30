@@ -264,6 +264,89 @@ fn zip_rejects_absolute_symlink_target() -> TestResult {
     Ok(())
 }
 
+/// Build a tree with a regular file on each side of a symlink, so a
+/// misaligned symlink entry would corrupt the file that follows it in
+/// archive order.
+fn build_straddling_tree(tree: &Utf8Path) -> TestResult {
+    fs_err::create_dir(tree)?;
+    fs_err::write(tree.join("a_data.bin"), vec![b'x'; 4096])?;
+    symlink("a_data.bin", tree.join("m_link").as_std_path())?;
+    fs_err::write(tree.join("z_after.txt"), b"after the symlink\n")?;
+    Ok(())
+}
+
+#[test]
+fn tar_mtime_override_does_not_corrupt_symlink_entry() -> TestResult {
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let tree = tmp.join("tree");
+    build_straddling_tree(&tree)?;
+
+    let archive = tmp.join("archive.tar");
+    let mut opts = compress_opts();
+    opts.fixed_mtime = Some(0);
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
+
+    // (a) list succeeds and reports every entry with correct sizes.
+    let entries = rz_archive::tar::list(&archive)?;
+    let names: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    let by_name = |suffix: &str| -> Result<&rz_archive::Entry, Box<dyn std::error::Error>> {
+        entries
+            .iter()
+            .find(|e| e.path.as_str().ends_with(suffix))
+            .ok_or_else(|| format!("missing entry ending in {suffix} among {names:?}").into())
+    };
+    assert_eq!(by_name("a_data.bin")?.size, 4096);
+    assert_eq!(by_name("m_link")?.size, 0);
+    assert_eq!(by_name("z_after.txt")?.size, 18);
+
+    // (b) + (c) decompress and check the symlink and the trailing file.
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    rz_archive::tar::decompress(&archive, &out, &decompress_opts())?;
+
+    let link = out.join("tree/m_link");
+    let meta = fs_err::symlink_metadata(&link)?;
+    assert!(
+        meta.file_type().is_symlink(),
+        "m_link should still be a symlink, got {:?}",
+        meta.file_type(),
+    );
+    let target = fs_err::read_link(&link)?;
+    let target = Utf8PathBuf::try_from(target)?;
+    assert_eq!(target, Utf8Path::new("a_data.bin"));
+
+    let after = fs_err::read(out.join("tree/z_after.txt"))?;
+    assert_eq!(after, b"after the symlink\n");
+    Ok(())
+}
+
+#[test]
+fn tar_no_override_round_trips_straddling_symlink() -> TestResult {
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let tree = tmp.join("tree");
+    build_straddling_tree(&tree)?;
+
+    let archive = tmp.join("archive.tar");
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &compress_opts())?;
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    rz_archive::tar::decompress(&archive, &out, &decompress_opts())?;
+
+    let link = out.join("tree/m_link");
+    let meta = fs_err::symlink_metadata(&link)?;
+    assert!(meta.file_type().is_symlink());
+    let target = fs_err::read_link(&link)?;
+    let target = Utf8PathBuf::try_from(target)?;
+    assert_eq!(target, Utf8Path::new("a_data.bin"));
+
+    let after = fs_err::read(out.join("tree/z_after.txt"))?;
+    assert_eq!(after, b"after the symlink\n");
+    Ok(())
+}
+
 #[test]
 fn zip_top_level_symlink_is_preserved() -> TestResult {
     let (_guard, tmp) = temp_utf8_dir()?;
