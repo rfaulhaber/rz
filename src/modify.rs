@@ -48,11 +48,6 @@ fn default_level_for(fmt: Format) -> Option<u32> {
 /// of this.  See `tar` crate's BLOCK_SIZE constant.
 const TAR_BLOCK: u64 = 512;
 
-/// Round `n` up to the nearest multiple of `TAR_BLOCK`.
-fn round_to_block(n: u64) -> u64 {
-    n.div_ceil(TAR_BLOCK).saturating_mul(TAR_BLOCK)
-}
-
 /// Path for the temporary file used by read-rewrite operations.
 fn temp_path(archive: &Utf8Path) -> Utf8PathBuf {
     Utf8PathBuf::from(format!("{archive}.tmp.rzappend"))
@@ -124,77 +119,30 @@ pub fn remove(
 
 // ── tar (uncompressed) ───────────────────────────────────────────────────────
 
-/// Build an `entry-name → mtime (unix seconds)` index from a tar stream.
-/// Used by `update` mode to decide whether each filesystem input is newer
-/// than the corresponding archive entry.
-///
-/// Keys are normalized without a trailing slash: GNU tar stores directory
-/// entries as `dir/` while the walk produces `dir`, and a missed lookup
-/// would make every update re-emit every directory.
-fn tar_index_from_reader(reader: &mut dyn Read) -> Result<HashMap<String, u64>> {
-    let mut a = tar::Archive::new(reader);
-    let mut idx = HashMap::new();
-    for entry in a.entries()? {
-        let entry = entry?;
-        let path = entry.path()?;
-        if let Some(name) = path.to_str() {
-            let mtime = entry.header().mtime().unwrap_or(0);
-            idx.insert(name.trim_end_matches('/').to_owned(), mtime);
-        }
-    }
-    Ok(idx)
-}
-
-/// [`tar_index_from_reader`] over an uncompressed tar file on disk.
-fn tar_index_uncompressed(archive: &Utf8Path) -> Result<HashMap<String, u64>> {
-    let file = fs_err::File::open(archive)?;
-    let mut buf = BufReader::new(file);
-    tar_index_from_reader(&mut buf)
-}
-
 fn tar_append(
     archive: &Utf8Path,
     inputs: &[Utf8PathBuf],
     mode: AppendMode,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
-    let archive_idx = if mode == AppendMode::Update {
-        Some(tar_index_uncompressed(archive)?)
-    } else {
-        None
-    };
-
-    // Find the position of the first byte after the last entry's data block.
-    // The trailing zero blocks (if any) start at or after this position; we
-    // overwrite them with new entries followed by a fresh terminator written
-    // by Builder::into_inner.
-    let body_end = {
+    // One block-level scan yields both the update index and the physical end
+    // of the last entry — where the trailing zero blocks begin, which the
+    // append overwrites with new entries and a fresh terminator.  The scan
+    // is header-aware (GNU sparse, pax size overrides, long names), which
+    // tar-rs iteration is not: `Entry::size()` reports a sparse entry's
+    // expanded logical size, and trusting it here used to extend the archive
+    // across the hole.
+    let (archive_idx, body_end) = {
         let file = fs_err::File::open(archive)?;
-        let mut a = tar::Archive::new(BufReader::new(file));
-        let mut max_end: u64 = 0;
-        for entry in a.entries()? {
-            let entry = entry?;
-            // `entry.size()` for a GNU sparse entry is the expanded logical
-            // size (tar-rs's sparse-header parser sets it from the header's
-            // real-size field), not the physical bytes stored in the
-            // archive. Trusting it here would push `body_end` past the
-            // entry's actual on-disk extent, and the `set_len` in
-            // `tar_write_appended` would then extend the archive across the
-            // sparse hole instead of truncating trailing zero blocks —
-            // silently corrupting the file. Refuse before anything is
-            // written; this scan is read-only, so no mutation has happened
-            // yet.
-            if entry.header().entry_type().is_gnu_sparse() {
-                return Err(Error::SparseModifyUnsupported);
-            }
-            let end = entry
-                .raw_file_position()
-                .saturating_add(round_to_block(entry.size()));
-            if end > max_end {
-                max_end = end;
-            }
-        }
-        max_end
+        let mut buf = BufReader::new(file);
+        let scan = crate::tar_raw::scan(&mut buf)?;
+        let idx = (mode == AppendMode::Update).then(|| {
+            scan.entries
+                .iter()
+                .map(|e| (e.name.trim_end_matches('/').to_owned(), e.mtime))
+                .collect::<HashMap<String, u64>>()
+        });
+        (idx, scan.body_end)
     };
 
     let opts = filtered_opts(opts, archive_idx.as_ref());
@@ -539,15 +487,17 @@ fn xz_writer(writer: BufWriter<fs_err::File>, level: u32) -> Result<Box<dyn Enco
 /// down through the file.
 trait EncoderHandle {
     /// Read-rewrite copy of every existing entry from `reader` into the
-    /// internal tar builder, then return so the caller can append new
-    /// entries via [`Self::append`].
+    /// internal writer, then return so the caller can append new entries via
+    /// [`Self::append_inputs`].
     ///
-    /// `keep` returns `true` when the entry should be carried over.
+    /// `keep` returns `true` when the entry should be carried over.  Kept
+    /// entry groups are copied byte-for-byte via [`crate::tar_raw`], so GNU
+    /// sparse maps, pax records, and long-name extensions survive verbatim.
     fn copy_existing(
         &mut self,
         reader: &mut dyn Read,
         keep: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<HashMap<String, u64>>;
+    ) -> Result<()>;
     fn append_inputs(
         &mut self,
         inputs: &[Utf8PathBuf],
@@ -557,52 +507,21 @@ trait EncoderHandle {
     fn finish(self: Box<Self>) -> Result<()>;
 }
 
-/// Drive a tar Archive over `reader`, copying every entry that `keep`
-/// approves into `builder` via `Builder::append`.  Records the mtime of
-/// each surviving entry under its archive name so the caller can implement
-/// `update` semantics against that index.
-fn copy_tar_entries<W: Write>(
+/// Copy every entry group `keep` approves from `reader` straight into the
+/// builder's underlying writer, byte-for-byte, via [`crate::tar_raw`].
+///
+/// Writing past the builder is safe here: nothing has been appended yet, so
+/// the builder holds no partial state, and raw groups are whole 512-byte
+/// blocks — exactly what `Builder::append_*` would produce.  The byte-exact
+/// copy is what makes GNU sparse entries survive: their physical layout
+/// (base header, extended sparse blocks, compacted data) has no lossless
+/// representation through the tar crate's high-level API.
+fn copy_raw_entries<W: Write>(
     builder: &mut tar::Builder<W>,
     reader: &mut dyn Read,
     keep: &mut dyn FnMut(&str) -> bool,
-) -> Result<HashMap<String, u64>> {
-    let mut idx = HashMap::new();
-    let mut a = tar::Archive::new(reader);
-    for entry in a.entries()? {
-        let mut entry = entry?;
-        // Same hazard as `tar_append`'s body_end scan: a GNU sparse entry's
-        // `size()` is the expanded logical size, so `append_data` below
-        // would read that many bytes from `entry` under a cloned header that
-        // still describes the sparse layout — corrupting the re-emitted
-        // entry and misaligning every entry written after it. Every
-        // read-rewrite path (compressed append, remove, compressed remove)
-        // funnels through here, so refusing before the copy starts keeps the
-        // temp file from ever being renamed over the original.
-        if entry.header().entry_type().is_gnu_sparse() {
-            return Err(Error::SparseModifyUnsupported);
-        }
-        let path = entry.path()?;
-        let name = path
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(path.display().to_string()))?
-            .to_owned();
-        if !keep(&name) {
-            continue;
-        }
-        let mtime = entry.header().mtime().unwrap_or(0);
-        idx.insert(name.clone(), mtime);
-        // Clone the on-disk header so all metadata (mode, owner, mtime,
-        // entry type, link target, etc.) is preserved.  Use `append_data`
-        // rather than `append` so the path is rewritten through the
-        // long-name extension machinery — `header.path()` only returns
-        // what fits in the 100-byte name field, but `entry.path()` (used
-        // above) is the *resolved* full name from any preceding `L`
-        // header.  Re-emitting via `append_data` regenerates that
-        // extension if needed.
-        let mut header = entry.header().clone();
-        builder.append_data(&mut header, &name, &mut entry)?;
-    }
-    Ok(idx)
+) -> Result<()> {
+    crate::tar_raw::copy_entries(reader, builder.get_mut(), keep)
 }
 
 // Per-format encoder handles ---------------------------------------------------
@@ -625,9 +544,9 @@ impl EncoderHandle for GzHandle {
         &mut self,
         reader: &mut dyn Read,
         keep: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<()> {
         let b = self.builder.as_mut().ok_or_else(builder_taken_err)?;
-        copy_tar_entries(b, reader, keep)
+        copy_raw_entries(b, reader, keep)
     }
     fn append_inputs(
         &mut self,
@@ -685,9 +604,9 @@ impl EncoderHandle for ZstHandle {
         &mut self,
         reader: &mut dyn Read,
         keep: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<()> {
         let b = self.builder.as_mut().ok_or_else(builder_taken_err)?;
-        copy_tar_entries(b, reader, keep)
+        copy_raw_entries(b, reader, keep)
     }
     fn append_inputs(
         &mut self,
@@ -738,9 +657,9 @@ impl EncoderHandle for XzHandle {
         &mut self,
         reader: &mut dyn Read,
         keep: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<()> {
         let b = self.builder.as_mut().ok_or_else(builder_taken_err)?;
-        copy_tar_entries(b, reader, keep)
+        copy_raw_entries(b, reader, keep)
     }
     fn append_inputs(
         &mut self,
@@ -783,9 +702,9 @@ impl EncoderHandle for LzmaRust2XzHandle {
         &mut self,
         reader: &mut dyn Read,
         keep: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<()> {
         let b = self.builder.as_mut().ok_or_else(builder_taken_err)?;
-        copy_tar_entries(b, reader, keep)
+        copy_raw_entries(b, reader, keep)
     }
     fn append_inputs(
         &mut self,
@@ -830,9 +749,9 @@ impl EncoderHandle for Bz2Handle {
         &mut self,
         reader: &mut dyn Read,
         keep: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<HashMap<String, u64>> {
+    ) -> Result<()> {
         let b = self.builder.as_mut().ok_or_else(builder_taken_err)?;
-        copy_tar_entries(b, reader, keep)
+        copy_raw_entries(b, reader, keep)
     }
     fn append_inputs(
         &mut self,
@@ -893,7 +812,7 @@ fn tar_compressed_append_into(
     // decompression pass is the price of a correct plan.
     let (archive_idx, superseded) = if mode == AppendMode::Update {
         let mut reader = open_tar_reader(archive, fmt)?;
-        let idx = tar_index_from_reader(&mut reader)?;
+        let idx = crate::tar_raw::index_entries(&mut reader)?;
         let planned = plan_update_names(inputs, opts, &idx)?;
         (Some(idx), planned)
     } else {
@@ -906,7 +825,7 @@ fn tar_compressed_append_into(
 
     let mut reader = open_tar_reader(archive, fmt)?;
     let mut keep = |name: &str| !superseded.contains(name.trim_end_matches('/'));
-    let _ = handle.copy_existing(&mut reader, &mut keep)?;
+    handle.copy_existing(&mut reader, &mut keep)?;
 
     handle.append_inputs(inputs, opts, archive_idx.as_ref())?;
     handle.finish()?;
@@ -935,7 +854,7 @@ fn tar_remove_into(archive: &Utf8Path, tmp: &Utf8Path, glob: &GlobSet) -> Result
     let in_file = fs_err::File::open(archive)?;
     let mut reader: Box<dyn Read> = Box::new(BufReader::new(in_file));
     let mut keep = |name: &str| !glob.is_match(name.trim_end_matches('/'));
-    copy_tar_entries(&mut builder, &mut reader, &mut keep)?;
+    copy_raw_entries(&mut builder, &mut reader, &mut keep)?;
 
     let buf = builder.into_inner()?;
     let file = buf.into_inner().map_err(std::io::Error::other)?;

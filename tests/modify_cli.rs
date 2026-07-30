@@ -297,15 +297,13 @@ fn zip_append_adds_new_and_replaces_existing() -> TestResult {
     Ok(())
 }
 
-// ── GNU sparse entries: modify operations must refuse, not corrupt ──────────
+// ── GNU sparse entries: modify operations preserve them verbatim ────────────
 //
 // tar-rs reports `entry.size()` for a GNU sparse entry as the *expanded*
-// logical size (its sparse-header parser sets it from the header's
-// real-size field), not the bytes actually stored in the archive. Every
-// modify path that trusted it either seeks/truncates to the wrong offset
-// (the in-place `tar_append`) or clones the header while feeding the
-// fully-expanded body through `append_data` (every read-rewrite path), so
-// this must be refused before anything is written.
+// logical size, so no tar-rs-driven rewrite can handle one.  The modify
+// paths instead scan and copy raw 512-byte blocks (src/tar_raw.rs): the
+// in-place append computes the physical end from the real header fields,
+// and the read-rewrite paths carry kept entry groups through untouched.
 
 /// Path of the temp file a read-rewrite modify operation would use.
 fn tmp_sibling(archive: &Utf8Path) -> Utf8PathBuf {
@@ -359,8 +357,34 @@ fn write_sparse_tar_gz(path: &Utf8Path) -> TestResult {
     Ok(())
 }
 
+/// Extract `archive` into a fresh dir and verify the sparse entry expanded
+/// correctly: 100_000 bytes, zeros up to the tail, "alpha" at the end.
+fn assert_sparse_roundtrip(
+    tmp: &Utf8Path,
+    archive: &Utf8Path,
+    out_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = tmp.join(out_name);
+    let out = run(&[
+        "decompress",
+        archive.as_str(),
+        "-o",
+        out_dir.as_str(),
+        "-F",
+    ])?;
+    assert!(out.status.success(), "decompress failed: {}", stderr_of(&out));
+    let data = fs_err::read(out_dir.join("sparse.dat"))?;
+    assert_eq!(data.len(), 100_000, "sparse entry must expand to its logical size");
+    assert_eq!(&data[100_000 - 5..], b"alpha");
+    assert!(
+        data[..100_000 - 5].iter().all(|&b| b == 0),
+        "the hole must expand to zeros",
+    );
+    Ok(())
+}
+
 #[test]
-fn sparse_tar_append_refuses_and_leaves_archive_untouched() -> TestResult {
+fn sparse_tar_append_preserves_the_sparse_entry() -> TestResult {
     let (_g, tmp) = temp_utf8_dir()?;
     let archive = tmp.join("sparse.tar");
     write_sparse_tar(&archive)?;
@@ -371,116 +395,112 @@ fn sparse_tar_append_refuses_and_leaves_archive_untouched() -> TestResult {
 
     let out = run(&["append", archive.as_str(), f.as_str()])?;
     assert!(
-        !out.status.success(),
-        "append over a GNU sparse archive must fail",
-    );
-    assert!(
-        stderr_of(&out).to_lowercase().contains("sparse"),
-        "error should mention sparse entries: {}",
+        out.status.success(),
+        "append over a GNU sparse archive must succeed: {}",
         stderr_of(&out),
     );
+
+    // In-place append: everything up to the old EOF terminator is untouched.
+    let body_end = before.len() - 1024;
+    let after = fs_err::read(&archive)?;
     assert_eq!(
-        fs_err::read(&archive)?,
-        before,
-        "a refused append must not touch the archive",
+        &after[..body_end],
+        &before[..body_end],
+        "append must not rewrite the existing body",
     );
-    assert!(
-        !tmp_sibling(&archive).exists(),
-        "no temp file should remain after a refused append",
-    );
+
+    let listing = run(&["list", archive.as_str()])?;
+    let stdout = String::from_utf8_lossy(&listing.stdout).into_owned();
+    for name in ["sparse.dat", "plain.txt", "f.txt"] {
+        assert!(stdout.lines().any(|l| l == name), "missing {name}: {stdout}");
+    }
+    assert_sparse_roundtrip(&tmp, &archive, "out-append")?;
     Ok(())
 }
 
 #[test]
-fn sparse_tar_remove_nomatch_refuses_and_leaves_archive_untouched() -> TestResult {
+fn sparse_tar_remove_nomatch_is_byte_identical() -> TestResult {
     let (_g, tmp) = temp_utf8_dir()?;
     let archive = tmp.join("sparse.tar");
     write_sparse_tar(&archive)?;
     let before = fs_err::read(&archive)?;
 
-    // Even a pattern that matches nothing must be refused: the read-rewrite
-    // path clones the sparse header before it knows whether anything will
-    // be dropped, so a no-op remove is just as destructive pre-fix.
     let out = run(&["remove", archive.as_str(), "nomatch"])?;
     assert!(
-        !out.status.success(),
-        "remove over a GNU sparse archive must fail even with no matches",
-    );
-    assert!(
-        stderr_of(&out).to_lowercase().contains("sparse"),
-        "error should mention sparse entries: {}",
+        out.status.success(),
+        "no-match remove must succeed: {}",
         stderr_of(&out),
     );
     assert_eq!(
         fs_err::read(&archive)?,
         before,
-        "a refused remove must not touch the archive",
+        "raw group copying must reproduce the archive byte-for-byte",
     );
-    assert!(
-        !tmp_sibling(&archive).exists(),
-        "no temp file should remain after a refused remove",
-    );
+    assert!(!tmp_sibling(&archive).exists());
     Ok(())
 }
 
 #[test]
-fn sparse_tar_gz_append_refuses_and_leaves_archive_untouched() -> TestResult {
+fn sparse_tar_remove_other_entry_keeps_sparse_intact() -> TestResult {
+    let (_g, tmp) = temp_utf8_dir()?;
+    let archive = tmp.join("sparse.tar");
+    write_sparse_tar(&archive)?;
+
+    let out = run(&["remove", archive.as_str(), "plain.txt"])?;
+    assert!(out.status.success(), "remove failed: {}", stderr_of(&out));
+
+    let listing = run(&["list", archive.as_str()])?;
+    let stdout = String::from_utf8_lossy(&listing.stdout).into_owned();
+    assert!(stdout.lines().any(|l| l == "sparse.dat"));
+    assert!(!stdout.lines().any(|l| l == "plain.txt"));
+    assert_sparse_roundtrip(&tmp, &archive, "out-remove")?;
+    Ok(())
+}
+
+#[test]
+fn sparse_tar_gz_append_preserves_the_sparse_entry() -> TestResult {
     let (_g, tmp) = temp_utf8_dir()?;
     let archive = tmp.join("sparse.tar.gz");
     write_sparse_tar_gz(&archive)?;
-    let before = fs_err::read(&archive)?;
 
     let f = tmp.join("f.txt");
     fs_err::write(&f, b"new\n")?;
 
     let out = run(&["append", archive.as_str(), f.as_str()])?;
     assert!(
-        !out.status.success(),
-        "append over a GNU sparse tar.gz archive must fail",
-    );
-    assert!(
-        stderr_of(&out).to_lowercase().contains("sparse"),
-        "error should mention sparse entries: {}",
+        out.status.success(),
+        "append over a GNU sparse tar.gz must succeed: {}",
         stderr_of(&out),
     );
-    assert_eq!(
-        fs_err::read(&archive)?,
-        before,
-        "a refused append must not touch the archive",
-    );
-    assert!(
-        !tmp_sibling(&archive).exists(),
-        "no temp file should remain after a refused append",
-    );
+
+    let listing = run(&["list", archive.as_str()])?;
+    let stdout = String::from_utf8_lossy(&listing.stdout).into_owned();
+    for name in ["sparse.dat", "plain.txt", "f.txt"] {
+        assert!(stdout.lines().any(|l| l == name), "missing {name}: {stdout}");
+    }
+    assert_sparse_roundtrip(&tmp, &archive, "out-gz-append")?;
+    assert!(!tmp_sibling(&archive).exists());
     Ok(())
 }
 
 #[test]
-fn sparse_tar_gz_remove_nomatch_refuses_and_leaves_archive_untouched() -> TestResult {
+fn sparse_tar_gz_update_leaves_unrelated_sparse_entry_alone() -> TestResult {
     let (_g, tmp) = temp_utf8_dir()?;
     let archive = tmp.join("sparse.tar.gz");
     write_sparse_tar_gz(&archive)?;
-    let before = fs_err::read(&archive)?;
 
-    let out = run(&["remove", archive.as_str(), "nomatch"])?;
-    assert!(
-        !out.status.success(),
-        "remove over a GNU sparse tar.gz archive must fail even with no matches",
-    );
-    assert!(
-        stderr_of(&out).to_lowercase().contains("sparse"),
-        "error should mention sparse entries: {}",
-        stderr_of(&out),
-    );
-    assert_eq!(
-        fs_err::read(&archive)?,
-        before,
-        "a refused remove must not touch the archive",
-    );
-    assert!(
-        !tmp_sibling(&archive).exists(),
-        "no temp file should remain after a refused remove",
-    );
+    let f = tmp.join("fresh.txt");
+    fs_err::write(&f, b"fresh\n")?;
+
+    let out = run(&["update", archive.as_str(), f.as_str()])?;
+    assert!(out.status.success(), "update failed: {}", stderr_of(&out));
+
+    let listing = run(&["list", archive.as_str()])?;
+    let stdout = String::from_utf8_lossy(&listing.stdout).into_owned();
+    for name in ["sparse.dat", "plain.txt", "fresh.txt"] {
+        assert!(stdout.lines().any(|l| l == name), "missing {name}: {stdout}");
+    }
+    assert_sparse_roundtrip(&tmp, &archive, "out-gz-update")?;
     Ok(())
 }
 
