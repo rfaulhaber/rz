@@ -366,3 +366,90 @@ fn zip_top_level_symlink_is_preserved() -> TestResult {
     assert!(entry.is_symlink(), "top-level symlink must be preserved");
     Ok(())
 }
+
+// ── non-regular files under header overrides ─────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn tar_rejects_unix_socket_with_header_overrides() -> TestResult {
+    // Under --mtime (or any header override), append_file_entry used to fall
+    // through to the generic "other" branch for anything that isn't a
+    // symlink or regular file, turning a socket into a bogus archive entry
+    // instead of erroring the way the no-override path always has.
+    use std::os::unix::net::UnixListener;
+
+    let (_guard, tmp) = temp_utf8_dir()?;
+    let sock_path = tmp.join("test.sock");
+    let _listener = UnixListener::bind(sock_path.as_std_path())?;
+
+    let archive = tmp.join("archive.tar");
+    let mut opts = compress_opts();
+    opts.fixed_mtime = Some(0);
+    let res = rz_archive::tar::compress(std::slice::from_ref(&sock_path), &archive, &opts);
+    assert!(
+        res.is_err(),
+        "compressing a unix socket under a header override must fail, not silently archive it"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_rejects_unix_socket_without_header_overrides() -> TestResult {
+    // Guard for the no-override path, which already goes through tar's own
+    // `append_special` and errors on sockets today.
+    use std::os::unix::net::UnixListener;
+
+    let (_guard, tmp) = temp_utf8_dir()?;
+    let sock_path = tmp.join("test.sock");
+    let _listener = UnixListener::bind(sock_path.as_std_path())?;
+
+    let archive = tmp.join("archive.tar");
+    let res =
+        rz_archive::tar::compress(std::slice::from_ref(&sock_path), &archive, &compress_opts());
+    assert!(
+        res.is_err(),
+        "compressing a unix socket must fail even without header overrides"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_mtime_override_preserves_non_utf8_symlink_target() -> TestResult {
+    // The header-override symlink branch used to hard-fail converting the
+    // link target to a Utf8PathBuf, leaving a truncated archive. The target
+    // must round-trip as raw bytes, same as the no-override path.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let (_guard, tmp) = temp_utf8_dir()?;
+
+    let tree = tmp.join("tree");
+    fs_err::create_dir(&tree)?;
+    let raw_target: &[u8] = b"bad\xff\xfename";
+    symlink(
+        OsStr::from_bytes(raw_target),
+        tree.join("link").as_std_path(),
+    )?;
+
+    let archive = tmp.join("archive.tar");
+    let mut opts = compress_opts();
+    opts.fixed_mtime = Some(0);
+    rz_archive::tar::compress(std::slice::from_ref(&tree), &archive, &opts)?;
+
+    let out = tmp.join("out");
+    fs_err::create_dir(&out)?;
+    rz_archive::tar::decompress(&archive, &out, &decompress_opts())?;
+
+    let link = out.join("tree/link");
+    let meta = fs_err::symlink_metadata(&link)?;
+    assert!(meta.file_type().is_symlink());
+    let restored = fs_err::read_link(&link)?;
+    assert_eq!(
+        restored.as_os_str().as_bytes(),
+        raw_target,
+        "symlink target bytes must survive the round trip unmodified"
+    );
+    Ok(())
+}

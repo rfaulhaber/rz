@@ -582,20 +582,40 @@ fn append_file_entry<W: std::io::Write>(
             // `File::open` here would follow the link and stream the target's
             // contents under this header instead of a link record, shifting
             // every entry appended afterward and corrupting the archive.
+            //
+            // Pass the target straight through as raw bytes rather than
+            // validating UTF-8: `append_link` accepts any `AsRef<Path>` and
+            // handles non-UTF-8 targets (plus GNU long-link) the same way the
+            // no-override `append_path_with_name` path already does.
             let target = fs_err::read_link(fs_path)?;
-            let target = Utf8PathBuf::try_from(target)
-                .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
-            header.set_cksum();
-            builder.append_link(&mut header, archive_name, target.as_str())?;
+            builder.append_link(&mut header, archive_name, target)?;
         } else if file_type.is_file() {
             header.set_size(meta.len());
-            header.set_cksum();
             let mut file = fs_err::File::open(fs_path)?;
             builder.append_data(&mut header, archive_name, &mut file)?;
         } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+                if file_type.is_socket() {
+                    return Err(Error::Io(std::io::Error::other(format!(
+                        "{fs_path}: socket can not be archived"
+                    ))));
+                }
+                if file_type.is_char_device() || file_type.is_block_device() {
+                    // `Deterministic` mode's `fill_from` always zeroes
+                    // devmajor/devminor, so restore them from the raw rdev
+                    // the same way tar's own `append_special` does.
+                    let dev_id = meta.rdev();
+                    let dev_major = ((dev_id >> 32) & 0xffff_f000) | ((dev_id >> 8) & 0x0000_0fff);
+                    let dev_minor = ((dev_id >> 12) & 0xffff_ff00) | (dev_id & 0x0000_00ff);
+                    header.set_device_major(dev_major as u32)?;
+                    header.set_device_minor(dev_minor as u32)?;
+                }
+            }
             // Fifo/char/block device — no payload, entry type already set by
             // `set_metadata_in_mode`.
-            header.set_cksum();
             builder.append_data(&mut header, archive_name, std::io::empty())?;
         }
     } else {
@@ -808,13 +828,23 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         // Validate symlink/hardlink targets — the tar crate's unpack() will
         // happily create a symlink to `../../etc/passwd`, which a follow-up
         // entry can then be extracted through.
+        //
+        // The check runs on the raw path rather than requiring UTF-8: link
+        // targets are arbitrary bytes on unix, and a legitimate archive (GNU
+        // tar's, or rz's own raw-byte symlink entries) can carry a non-UTF-8
+        // target. Traversal only depends on path structure, not encoding.
         let entry_type = entry.header().entry_type();
         if matches!(entry_type, tar::EntryType::Symlink | tar::EntryType::Link)
             && let Some(target) = entry.link_name()?
+            && (target.is_absolute()
+                || target
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)))
         {
-            let target = Utf8PathBuf::try_from(target.into_owned())
-                .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
-            safe_link_target(orig_path.as_str(), target.as_str())?;
+            return Err(Error::PathTraversal(format!(
+                "{orig_path} -> {}",
+                target.to_string_lossy()
+            )));
         }
 
         // Include/exclude check against the original (pre-strip) path.
