@@ -6,14 +6,15 @@
 //! |---------------|--------------------------------|---------------|
 //! | tar           | in-place (seek past EOF marker)| read-rewrite  |
 //! | tar.gz/etc.   | read-rewrite (compressed layer cannot be patched) | read-rewrite |
-//! | zip           | in-place (`ZipWriter::new_append`)                | read-rewrite |
+//! | zip           | read-rewrite (`ZipWriter` cannot re-add an archived name) | read-rewrite |
 //! | 7z            | unsupported — `sevenz-rust2` does not expose write-into-existing |
 //!
 //! All read-rewrite paths write to `<archive>.tmp.rzappend` in the same
 //! directory and atomically rename on success, so a partial write never
-//! truncates the user's archive.
+//! truncates the user's archive.  The in-place tar path cannot use a rename,
+//! so it rolls the file back to its pre-append length instead.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -70,6 +71,10 @@ pub fn append(
         AppendMode::Append => "append",
         AppendMode::Update => "update",
     };
+    // Stat every input up front: the tar backend mutates the archive before it
+    // reaches the walk, so an unreadable path must abort while the archive is
+    // still untouched.
+    let inputs = &filter::validate_inputs(inputs, opts)?;
     match fmt {
         Format::Tar => tar_append(archive, inputs, mode, opts),
         Format::TarGz | Format::TarZst | Format::TarXz => {
@@ -169,7 +174,28 @@ fn tar_append(
         max_end
     };
 
-    // Re-open in read+write mode and seek to the end-of-data position.
+    let opts = filtered_opts(opts, archive_idx.as_ref());
+    let res = tar_write_appended(archive, body_end, inputs, &opts, archive_idx.as_ref());
+    if res.is_err() {
+        // A failure part-way through the walk leaves the new entries half
+        // written, and the abandoned builder's `Drop` stamps an EOF terminator
+        // on top of them.  Cutting back to `body_end` and re-terminating
+        // yields an archive holding exactly the entries it started with.
+        let _ = tar_truncate_and_terminate(archive, body_end);
+    }
+    res
+}
+
+/// Overwrite the trailing zero blocks of `archive` with `inputs` and a fresh
+/// EOF terminator.  Mutates the archive in place, so a failure here must be
+/// followed by [`tar_truncate_and_terminate`].
+fn tar_write_appended(
+    archive: &Utf8Path,
+    body_end: u64,
+    inputs: &[Utf8PathBuf],
+    opts: &CompressOpts<'_>,
+    archive_idx: Option<&HashMap<String, u64>>,
+) -> Result<()> {
     let mut file = fs_err::OpenOptions::new()
         .read(true)
         .write(true)
@@ -179,13 +205,27 @@ fn tar_append(
     // remaining EOF terminator and the file's logical length is correct.
     file.set_len(body_end)?;
 
-    let opts = filtered_opts(opts, archive_idx.as_ref());
     let buf = BufWriter::new(file);
     let mut builder = tar::Builder::new(buf);
     builder.follow_symlinks(opts.follow_symlinks);
-    append_inputs_with_index(&mut builder, inputs, &opts, archive_idx.as_ref())?;
+    append_inputs_with_index(&mut builder, inputs, opts, archive_idx)?;
     let buf = builder.into_inner()?;
     let file = buf.into_inner().map_err(std::io::Error::other)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Cut `archive` back to `body_end` and write a fresh two-block EOF
+/// terminator, leaving a valid tar holding exactly the entries that ended at
+/// `body_end`.
+fn tar_truncate_and_terminate(archive: &Utf8Path, body_end: u64) -> Result<()> {
+    let mut file = fs_err::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(archive)?;
+    file.set_len(body_end)?;
+    file.seek(SeekFrom::Start(body_end))?;
+    file.write_all(&[0u8; 2 * TAR_BLOCK as usize])?;
     file.sync_all()?;
     Ok(())
 }
@@ -841,6 +881,27 @@ fn zip_dt_to_secs(dt: zip::DateTime) -> u64 {
     if stamp >= 0 { stamp as u64 } else { 0 }
 }
 
+/// An entry the append/update walk decided to write, resolved before the
+/// output is opened so the rewrite knows which archived names it supersedes.
+enum PlannedZipEntry {
+    File {
+        name: String,
+        fs_path: Utf8PathBuf,
+    },
+    /// Bare directory entry, emitted only under `--no-recursion`.
+    Dir {
+        name: String,
+    },
+}
+
+impl PlannedZipEntry {
+    fn name(&self) -> &str {
+        match self {
+            Self::File { name, .. } | Self::Dir { name } => name,
+        }
+    }
+}
+
 fn zip_append(
     archive: &Utf8Path,
     inputs: &[Utf8PathBuf],
@@ -853,16 +914,31 @@ fn zip_append(
         None
     };
 
-    let file = fs_err::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(archive)?;
-    let mut zw = zip::ZipWriter::new_append(file)?;
+    let planned = plan_zip_entries(inputs, opts, archive_idx.as_ref())?;
+    if planned.is_empty() {
+        return Ok(());
+    }
 
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(opts.level.map(i64::from));
+    // `ZipWriter::new_append` seeds its name set from the central directory and
+    // rejects any name already there, which is exactly the case `update` hits.
+    // Rewriting instead lets a planned entry supersede the archived copy —
+    // Info-ZIP's behaviour — and keeps the original intact on failure.
+    let tmp = temp_path(archive);
+    let res = zip_rewrite_with(archive, &tmp, &planned, opts);
+    if res.is_err() {
+        let _ = fs_err::remove_file(&tmp);
+    }
+    res
+}
 
+/// Resolve which filesystem entries an append/update would write, without
+/// touching the archive.
+fn plan_zip_entries(
+    inputs: &[Utf8PathBuf],
+    opts: &CompressOpts<'_>,
+    archive_idx: Option<&HashMap<String, u64>>,
+) -> Result<Vec<PlannedZipEntry>> {
+    let mut planned = Vec::new();
     for input in inputs {
         let meta = filter::input_metadata(input, opts.follow_symlinks)?;
         let name = input.file_name().unwrap_or(input.as_str());
@@ -870,57 +946,88 @@ fn zip_append(
             continue;
         }
         if meta.is_dir() {
-            zip_add_dir(&mut zw, input, name, options, opts, archive_idx.as_ref())?;
-        } else if should_add_zip_entry(name, &meta, archive_idx.as_ref()) {
-            zw.start_file(name, crate::zip::with_unix_mode(options, &meta))?;
-            let mut f = fs_err::File::open(input)?;
-            let size = std::io::copy(&mut f, &mut zw)?;
-            opts.progress.set_entry(name);
-            opts.progress.inc(size);
+            if opts.no_recursion {
+                planned.push(PlannedZipEntry::Dir {
+                    name: name.to_owned(),
+                });
+                continue;
+            }
+            filter::walk_dir(input, name, opts, &mut |entry| {
+                if entry.is_dir {
+                    // Directory entries carry no data; unzippers materialise
+                    // the leading path components of each file anyway, so the
+                    // archive's existing ones are left alone.
+                    return Ok(());
+                }
+                let meta = filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+                if !should_add_zip_entry(&entry.archive_name, &meta, archive_idx) {
+                    return Ok(());
+                }
+                planned.push(PlannedZipEntry::File {
+                    name: entry.archive_name,
+                    fs_path: entry.fs_path,
+                });
+                Ok(())
+            })?;
+        } else if should_add_zip_entry(name, &meta, archive_idx) {
+            planned.push(PlannedZipEntry::File {
+                name: name.to_owned(),
+                fs_path: input.clone(),
+            });
         }
     }
-
-    let file = zw.finish()?;
-    file.sync_all()?;
-    Ok(())
+    Ok(planned)
 }
 
-fn zip_add_dir(
-    zw: &mut zip::ZipWriter<fs_err::File>,
-    dir: &Utf8Path,
-    prefix: &str,
-    options: zip::write::SimpleFileOptions,
+/// Copy every archived entry the plan does not supersede into `tmp`, write the
+/// planned entries after them, then rename `tmp` over `archive`.
+fn zip_rewrite_with(
+    archive: &Utf8Path,
+    tmp: &Utf8Path,
+    planned: &[PlannedZipEntry],
     opts: &CompressOpts<'_>,
-    archive_idx: Option<&HashMap<String, u64>>,
 ) -> Result<()> {
-    if opts.no_recursion {
-        // Record the bare directory entry; existing entry-name collisions
-        // surface as a zip-crate error (duplicate-filename), which is fine.
-        let _ = zw.add_directory(format!("{prefix}/"), options);
-        return Ok(());
+    let superseded: HashSet<&str> = planned.iter().map(PlannedZipEntry::name).collect();
+
+    let in_file = fs_err::File::open(archive)?;
+    let mut src = zip::ZipArchive::new(in_file)?;
+    let out_file = fs_err::File::create(tmp)?;
+    let mut dst = zip::ZipWriter::new(out_file);
+
+    for i in 0..src.len() {
+        // Raw copies carry the compressed bytes over verbatim — no
+        // recompression of entries the user did not touch.
+        let raw = src.by_index_raw(i)?;
+        if superseded.contains(raw.name().trim_end_matches('/')) {
+            continue;
+        }
+        dst.raw_copy_file(raw)?;
     }
-    filter::walk_dir(dir, prefix, opts, &mut |entry| {
-        if entry.is_dir {
-            // Skip directory entries on append/update — zip treats these as
-            // metadata-only and re-emitting them would conflict with the
-            // archive's central directory.  Files inside still work because
-            // unzippers treat the leading path components as implicit dirs.
-            return Ok(());
+
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(opts.level.map(i64::from));
+
+    for entry in planned {
+        match entry {
+            PlannedZipEntry::Dir { name } => {
+                dst.add_directory(format!("{name}/"), options)?;
+            }
+            PlannedZipEntry::File { name, fs_path } => {
+                let meta = filter::input_metadata(fs_path, opts.follow_symlinks)?;
+                dst.start_file(name, crate::zip::with_unix_mode(options, &meta))?;
+                let mut f = fs_err::File::open(fs_path)?;
+                let size = std::io::copy(&mut f, &mut dst)?;
+                opts.progress.set_entry(name);
+                opts.progress.inc(size);
+            }
         }
-        let meta = filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
-        if !should_add_zip_entry(&entry.archive_name, &meta, archive_idx) {
-            return Ok(());
-        }
-        zw.start_file(
-            &entry.archive_name,
-            crate::zip::with_unix_mode(options, &meta),
-        )?;
-        let mut f = fs_err::File::open(&entry.fs_path)?;
-        let size = std::io::copy(&mut f, zw)?;
-        opts.progress.set_entry(&entry.archive_name);
-        opts.progress.inc(size);
-        Ok(())
-    })
+    }
+
+    let file = dst.finish()?;
+    file.sync_all()?;
+    fs_err::rename(tmp, archive)?;
+    Ok(())
 }
 
 fn should_add_zip_entry(
