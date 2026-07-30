@@ -510,6 +510,51 @@ fn run(cli: Cli) -> Result<()> {
                 filter::build_glob_set(&all_includes)?
             };
 
+            // Flag-support validation runs before the dry-run branch so a
+            // preview never exits 0 for a command whose real run would be
+            // rejected.
+            //
+            // --same-owner only applies to tar-family extraction (zip/7z
+            // don't carry portable uid/gid).  Reject up front so users don't
+            // assume ownership is being restored silently.
+            let is_tar_family = matches!(
+                fmt,
+                Format::Tar | Format::TarGz | Format::TarZst | Format::TarXz | Format::TarBz2
+            );
+            if same_owner && !is_tar_family {
+                return Err(Error::ReproducibilityFlagUnsupported {
+                    flag: "--same-owner",
+                    format: fmt.to_string(),
+                });
+            }
+            // Time-based filters read the entry mtime from the tar header;
+            // zip and 7z entries don't expose reliable mtime through the
+            // current crates (sevenz-rust2 in particular).  Reject rather
+            // than silently returning no matches.
+            if !is_tar_family && (newer_than.is_some() || older_than.is_some()) {
+                let flag = if newer_than.is_some() {
+                    "--newer-than"
+                } else {
+                    "--older-than"
+                };
+                return Err(Error::ReproducibilityFlagUnsupported {
+                    flag,
+                    format: fmt.to_string(),
+                });
+            }
+            // Mirror the 7z module's own rejections so dry-run predicts them
+            // instead of printing paths a real run would refuse to create.
+            if fmt == Format::SevenZ {
+                if strip_components > 0 {
+                    return Err(Error::StripComponentsUnsupported("7z".to_owned()));
+                }
+                if keep_newer {
+                    return Err(Error::KeepNewerUnsupported("7z".to_owned()));
+                }
+            }
+
+            reject_encryption_for_non_supported(&fmt, &password)?;
+
             // Dry-run: list what would be extracted and exit.
             if dry_run {
                 let entries = if from_stdin {
@@ -541,17 +586,48 @@ fn run(cli: Cli) -> Result<()> {
                         other => return Err(Error::UnsupportedFormat(other.to_string())),
                     }
                 };
+                // Resolve each entry through the same chain the extractors
+                // use (mtime window, --no-directory, --rename, --prefix via
+                // filter::resolve_entry_path), so the preview names the paths
+                // a real run would create — not just the stripped originals.
+                let dry_opts = DecompressOpts {
+                    force,
+                    no_overwrite,
+                    keep_newer,
+                    no_directory,
+                    strip_components,
+                    includes,
+                    excludes,
+                    backup_suffix: None,
+                    preserve_permissions,
+                    same_owner,
+                    newer_than,
+                    older_than,
+                    renames: rename,
+                    prefix,
+                    progress: &NoProgress,
+                    password: None,
+                };
                 let mut stdout = std::io::stdout().lock();
                 for entry in &entries {
-                    if !filter::should_extract(entry.path.as_str(), &includes, &excludes) {
+                    if !filter::should_extract(
+                        entry.path.as_str(),
+                        &dry_opts.includes,
+                        &dry_opts.excludes,
+                    ) {
                         continue;
                     }
-                    if let Some(stripped) = filter::strip_components(&entry.path, strip_components)
-                    {
+                    if !filter::passes_time_filter(entry.mtime as i64, newer_than, older_than) {
+                        continue;
+                    }
+                    if entry.is_dir && no_directory {
+                        continue;
+                    }
+                    if let Some(dest) = filter::resolve_entry_path(&entry.path, &dry_opts)? {
                         let _ = writeln!(
                             stdout,
                             "{}",
-                            rz_archive::progress::escape_entry_name(stripped.as_str())
+                            rz_archive::progress::escape_entry_name(dest.as_str())
                         );
                     }
                 }
@@ -594,36 +670,6 @@ fn run(cli: Cli) -> Result<()> {
             } else {
                 None
             };
-            // --same-owner only applies to tar-family extraction (zip/7z
-            // don't carry portable uid/gid).  Reject up front so users don't
-            // assume ownership is being restored silently.
-            let is_tar_family = matches!(
-                fmt,
-                Format::Tar | Format::TarGz | Format::TarZst | Format::TarXz | Format::TarBz2
-            );
-            if same_owner && !is_tar_family {
-                return Err(Error::ReproducibilityFlagUnsupported {
-                    flag: "--same-owner",
-                    format: fmt.to_string(),
-                });
-            }
-            // Time-based filters read the entry mtime from the tar header;
-            // zip and 7z entries don't expose reliable mtime through the
-            // current crates (sevenz-rust2 in particular).  Reject rather
-            // than silently returning no matches.
-            if !is_tar_family && (newer_than.is_some() || older_than.is_some()) {
-                let flag = if newer_than.is_some() {
-                    "--newer-than"
-                } else {
-                    "--older-than"
-                };
-                return Err(Error::ReproducibilityFlagUnsupported {
-                    flag,
-                    format: fmt.to_string(),
-                });
-            }
-
-            reject_encryption_for_non_supported(&fmt, &password)?;
 
             let opts = DecompressOpts {
                 force,
