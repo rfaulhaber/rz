@@ -1,7 +1,11 @@
 use std::io::{BufReader, BufWriter};
 
 use bzip2::Compression;
-use bzip2::read::BzDecoder;
+// MultiBzDecoder, not BzDecoder: pbzip2/lbzip2 emit one independent bzip2
+// stream per block, and the single-stream decoder stops silently at the end
+// of the first one — truncating the archive mid-read.  This mirrors the gz
+// modules, which use MultiGzDecoder for the same reason.
+use bzip2::read::MultiBzDecoder;
 use bzip2::write::BzEncoder;
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -75,7 +79,7 @@ pub fn decompress_from_reader<R: std::io::Read>(
     output: &Utf8Path,
     opts: &DecompressOpts<'_>,
 ) -> Result<()> {
-    let bz = BzDecoder::new(reader);
+    let bz = MultiBzDecoder::new(reader);
     let mut archive = tar::Archive::new(bz);
     filter::unpack_tar_filtered(&mut archive, output, opts)?;
     Ok(())
@@ -98,7 +102,7 @@ pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(
     writer: &mut W,
     opts: &DecompressOpts<'_>,
 ) -> Result<()> {
-    let bz = BzDecoder::new(reader);
+    let bz = MultiBzDecoder::new(reader);
     let mut archive = tar::Archive::new(bz);
     filter::extract_tar_to_writer(&mut archive, writer, opts)
 }
@@ -108,7 +112,7 @@ pub fn decompress_reader_to_writer<R: std::io::Read, W: std::io::Write>(
 pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) -> Result<()> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
-    let bz = BzDecoder::new(buf);
+    let bz = MultiBzDecoder::new(buf);
     let mut archive = tar::Archive::new(bz);
     filter::verify_tar_entries(&mut archive, progress)
 }
@@ -118,14 +122,14 @@ pub fn test(input: &Utf8Path, progress: &dyn crate::progress::ProgressReport) ->
 pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
-    let bz = BzDecoder::new(buf);
+    let bz = MultiBzDecoder::new(buf);
     let mut archive = tar::Archive::new(bz);
     filter::list_tar_entries(&mut archive)
 }
 
 /// List entries from an arbitrary reader (e.g. stdin).
 pub fn list_from_reader<R: std::io::Read>(reader: R) -> Result<Vec<Entry>> {
-    let bz = BzDecoder::new(reader);
+    let bz = MultiBzDecoder::new(reader);
     let mut archive = tar::Archive::new(bz);
     filter::list_tar_entries(&mut archive)
 }
@@ -135,7 +139,7 @@ pub fn test_from_reader<R: std::io::Read>(
     reader: R,
     progress: &dyn crate::progress::ProgressReport,
 ) -> Result<()> {
-    let bz = BzDecoder::new(reader);
+    let bz = MultiBzDecoder::new(reader);
     let mut archive = tar::Archive::new(bz);
     filter::verify_tar_entries(&mut archive, progress)
 }
@@ -147,7 +151,7 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 
     let file = fs_err::File::open(input)?;
     let buf = BufReader::new(file);
-    let bz = BzDecoder::new(buf);
+    let bz = MultiBzDecoder::new(buf);
     let mut archive = tar::Archive::new(bz);
     let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
 
@@ -167,7 +171,7 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
 pub fn info_from_reader<R: std::io::Read>(reader: R) -> Result<ArchiveInfo> {
     let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counting = filter::CountingReader::new(reader, std::sync::Arc::clone(&counter));
-    let bz = BzDecoder::new(counting);
+    let bz = MultiBzDecoder::new(counting);
     let mut archive = tar::Archive::new(bz);
     let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
 

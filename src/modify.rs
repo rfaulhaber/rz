@@ -405,8 +405,12 @@ fn open_tar_reader(archive: &Utf8Path, fmt: Format) -> Result<Box<dyn Read>> {
         // during the read-rewrite.
         Format::TarZst => Ok(Box::new(crate::tar_zst::MultiFrameDecoder::new(buf)?)),
         Format::TarXz => xz_read(buf),
+        // MultiBzDecoder for the same reason as MultiGzDecoder above:
+        // pbzip2/lbzip2 output is a train of independent streams, and the
+        // single-stream decoder would silently truncate the read-rewrite at
+        // the first stream boundary.
         #[cfg(feature = "bzip2")]
-        Format::TarBz2 => Ok(Box::new(bzip2::read::BzDecoder::new(buf))),
+        Format::TarBz2 => Ok(Box::new(bzip2::read::MultiBzDecoder::new(buf))),
         #[cfg(not(feature = "bzip2"))]
         Format::TarBz2 => Err(Error::FormatFeatureDisabled {
             format: fmt.to_string(),
