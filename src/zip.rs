@@ -237,12 +237,14 @@ const MAX_SYMLINK_TARGET: u64 = 8 * 1024;
 /// entry cannot be written *through* a freshly-created symlink into territory
 /// outside the output root (the classic symlink-based zip-slip).
 ///
-/// When `existed` is true, any existing path at `out_path` is removed first,
-/// because `symlink(2)` fails if the target already exists.
+/// Any path still present at `out_path` is removed first, because
+/// `symlink(2)` fails if the target already exists.  Presence is re-checked
+/// here rather than trusted from the caller's earlier stat: the `--backup`
+/// branch renames the original away in between, and acting on the stale
+/// answer used to abort the extraction with NotFound.
 fn extract_symlink_entry(
     entry: &mut zip::read::ZipFile<'_, fs_err::File>,
     out_path: &Utf8Path,
-    existed: bool,
     dest_path: &Utf8Path,
 ) -> Result<u64> {
     // Never size this from `entry.size()`.  That is the central directory's
@@ -268,7 +270,7 @@ fn extract_symlink_entry(
 
     filter::safe_link_target(dest_path.as_str(), target)?;
 
-    if existed {
+    if fs_err::symlink_metadata(out_path).is_ok() {
         fs_err::remove_file(out_path)?;
     }
 
@@ -515,17 +517,16 @@ fn extract_entry(
     }
 
     if entry.is_symlink() {
-        let written = extract_symlink_entry(&mut entry, &out_path, existed, dest_path)?;
+        let written = extract_symlink_entry(&mut entry, &out_path, dest_path)?;
         opts.progress.set_entry(dest_path.as_str());
         opts.progress.inc(written);
     } else {
         let unix_mode = entry.unix_mode();
         // If overwriting an existing symlink, remove it first so the new file
-        // replaces the link rather than the link's target.
-        if existed
-            && fs_err::symlink_metadata(&out_path)?
-                .file_type()
-                .is_symlink()
+        // replaces the link rather than the link's target.  Re-stat instead
+        // of reusing `existed`: the backup branch renames the original away.
+        if fs_err::symlink_metadata(&out_path)
+            .is_ok_and(|m| m.file_type().is_symlink())
         {
             fs_err::remove_file(&out_path)?;
         }

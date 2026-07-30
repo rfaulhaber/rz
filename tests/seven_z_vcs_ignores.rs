@@ -48,8 +48,8 @@ fn exclude_vcs_ignores_preserves_subdirectory_paths() -> TestResult {
     build_vcs_tree(&tree)?;
 
     // Baseline: compress the same tree with no VCS awareness at all, so
-    // nothing is excluded and every file is named the same way 7z always
-    // names entries for a whole-directory input (no leading "vcs/").
+    // nothing is excluded.  Entries are named the way every backend names
+    // them for a directory input: prefixed with the input's own name.
     let plain_archive = tmp.join("plain.7z");
     let status = Command::new(rz_archive_bin())
         .args(["compress", "-o", plain_archive.as_str(), tree.as_str()])
@@ -84,7 +84,7 @@ fn exclude_vcs_ignores_preserves_subdirectory_paths() -> TestResult {
 
     // Name parity: the flag must only change which files are included, never
     // how the surviving ones are named.
-    for name in ["top.txt", "sub1/dup.txt", "sub2/dup.txt"] {
+    for name in ["vcs/top.txt", "vcs/sub1/dup.txt", "vcs/sub2/dup.txt"] {
         assert!(
             plain_stdout.lines().any(|l| l == name),
             "baseline listing missing {name}: {plain_stdout:?}",
@@ -98,11 +98,11 @@ fn exclude_vcs_ignores_preserves_subdirectory_paths() -> TestResult {
 
     // The gitignore rule only takes effect with the flag.
     assert!(
-        plain_stdout.lines().any(|l| l == "ignored.txt"),
+        plain_stdout.lines().any(|l| l == "vcs/ignored.txt"),
         "baseline should still include ignored.txt: {plain_stdout:?}",
     );
     assert!(
-        !flagged_stdout.lines().any(|l| l == "ignored.txt"),
+        !flagged_stdout.lines().any(|l| l == "vcs/ignored.txt"),
         "flagged listing should have excluded ignored.txt: {flagged_stdout:?}",
     );
 
@@ -113,11 +113,11 @@ fn exclude_vcs_ignores_preserves_subdirectory_paths() -> TestResult {
         .status()?;
     assert!(status.success(), "decompress failed: {status}");
 
-    assert_eq!(fs_err::read_to_string(out.join("sub1/dup.txt"))?, "one\n");
-    assert_eq!(fs_err::read_to_string(out.join("sub2/dup.txt"))?, "two\n");
-    assert_eq!(fs_err::read_to_string(out.join("top.txt"))?, "top\n");
+    assert_eq!(fs_err::read_to_string(out.join("vcs/sub1/dup.txt"))?, "one\n");
+    assert_eq!(fs_err::read_to_string(out.join("vcs/sub2/dup.txt"))?, "two\n");
+    assert_eq!(fs_err::read_to_string(out.join("vcs/top.txt"))?, "top\n");
     assert!(
-        !out.join("ignored.txt").exists(),
+        !out.join("vcs/ignored.txt").exists(),
         "ignored.txt should not be extracted"
     );
 

@@ -37,17 +37,30 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
         writer.set_content_methods(vec![comp_cfg]);
     }
 
+    // Explicit walk via filter::walk_dir — the same traversal and naming tar
+    // and zip use (`<input-name>/<relative>` for directory inputs), replacing
+    // sevenz-rust2's own `push_source_path` walk, which stripped the input
+    // directory's name (rz-made 7z archives tar-bombed on extraction and
+    // equal-named children of multiple inputs silently collided), never
+    // surfaced symlinks, and ignored `follow_symlinks` entirely.  Excludes
+    // now match archive-relative names, also like tar and zip.
     for input in &inputs {
         let meta = crate::filter::input_metadata(input, opts.follow_symlinks)?;
-        if meta.is_dir() && opts.no_recursion {
-            // Only add the directory entry, not its contents.
+        let name = input.file_name().unwrap_or(input.as_str());
+        if opts.excludes.is_match(name) {
             continue;
         }
-        if meta.is_dir() && opts.exclude_vcs_ignores {
-            push_dir_vcs(&mut writer, input, opts)?;
+        let link_meta = fs_err::symlink_metadata(input)?;
+        if !opts.follow_symlinks && link_meta.file_type().is_symlink() {
+            push_symlink_entry(&mut writer, input, name, &link_meta, opts)?;
+        } else if meta.is_dir() {
+            if opts.no_recursion {
+                push_dir_entry(&mut writer, input, name, &meta)?;
+            } else {
+                push_dir_walked(&mut writer, input, name, opts)?;
+            }
         } else {
-            let excludes = &opts.excludes;
-            writer.push_source_path(input, |name| !excludes.is_match(name))?;
+            push_file_entry(&mut writer, input, name, &meta, opts)?;
         }
     }
     let file = writer.finish()?;
@@ -55,69 +68,133 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     Ok(())
 }
 
-/// Walk a directory with VCS-ignore awareness and add entries to the 7z writer.
-///
-/// Entries are pushed one file at a time via `push_archive_entry` with an
-/// explicit archive-relative name. `push_source_path` derives the archive name
-/// from the source path itself, which collapses to the bare file name when
-/// that path is a single file — same-named files in different subdirectories
-/// would then collide and overwrite one another in the archive.
-fn push_dir_vcs(
+// ── p7zip Unix attribute encoding ────────────────────────────────────────────
+
+/// 7-Zip's marker that the high 16 bits of the attributes word carry a Unix
+/// `st_mode` (`FILE_ATTRIBUTE_UNIX_EXTENSION` in the p7zip source).
+const ATTR_UNIX_EXTENSION: u32 = 0x8000;
+const ATTR_READONLY: u32 = 0x1;
+const ATTR_DIRECTORY: u32 = 0x10;
+const ATTR_ARCHIVE: u32 = 0x20;
+
+/// Encode a Unix mode the way p7zip's `Get_WinAttribPosix_From_PosixMode`
+/// does — DOS directory/archive flag (plus read-only when no write bit is
+/// set), the extension marker, and the full `st_mode` (type bits included)
+/// shifted into the high half — so 7-Zip itself restores modes from rz
+/// archives and vice versa.
+#[cfg(unix)]
+fn unix_attributes(mode: u32) -> u32 {
+    let mut low = if mode & 0xF000 == 0o040000 {
+        ATTR_DIRECTORY
+    } else {
+        ATTR_ARCHIVE
+    };
+    if mode & 0o222 == 0 {
+        low |= ATTR_READONLY;
+    }
+    low | ATTR_UNIX_EXTENSION | ((mode & 0xFFFF) << 16)
+}
+
+/// Stamp `meta`'s Unix mode onto the entry's attribute word.  A no-op on
+/// non-Unix hosts, which keeps whatever `from_path` left (nothing).
+fn apply_unix_attributes(entry: &mut ArchiveEntry, meta: &std::fs::Metadata) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        entry.windows_attributes = unix_attributes(meta.mode());
+        entry.has_windows_attributes = true;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (entry, meta);
+    }
+}
+
+/// Decode the Unix mode from an entry's attribute word, when present.
+fn entry_unix_mode(entry: &ArchiveEntry) -> Option<u32> {
+    (entry.has_windows_attributes && entry.windows_attributes & ATTR_UNIX_EXTENSION != 0)
+        .then_some((entry.windows_attributes >> 16) & 0xFFFF)
+}
+
+// ── Compress-side entry writers ──────────────────────────────────────────────
+
+fn push_dir_walked(
     writer: &mut sevenz_rust2::ArchiveWriter<std::fs::File>,
     dir: &Utf8Path,
+    prefix: &str,
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
-    let excludes = &opts.excludes;
-    for result in crate::filter::vcs_walker(dir, opts.follow_symlinks) {
-        let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
-        let fs_path = entry.path();
-        let file_type = entry.file_type();
-
-        // A non-following walk reports a symlink's own type, never its
-        // target's. Skip it here to match the non-VCS branch below: it
-        // walks via sevenz-rust2's `collect_file_paths`, which decides
-        // whether to recurse from the raw (non-following) `DirEntry` file
-        // type and so never surfaces a symlink at all, regardless of
-        // `follow_symlinks`. Without this, a symlink-to-file was silently
-        // dereferenced, a symlink-to-dir became an empty directory entry
-        // with its contents dropped, and a dangling symlink hard-failed the
-        // whole compress.
-        if !opts.follow_symlinks && file_type.is_some_and(|ft| ft.is_symlink()) {
-            continue;
+    crate::filter::walk_dir(dir, prefix, opts, &mut |entry| {
+        let link_meta = fs_err::symlink_metadata(&entry.fs_path)?;
+        if !opts.follow_symlinks && link_meta.file_type().is_symlink() {
+            push_symlink_entry(writer, &entry.fs_path, &entry.archive_name, &link_meta, opts)
+        } else if entry.is_dir {
+            let meta = crate::filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+            push_dir_entry(writer, &entry.fs_path, &entry.archive_name, &meta)
+        } else {
+            let meta = crate::filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+            push_file_entry(writer, &entry.fs_path, &entry.archive_name, &meta, opts)
         }
+    })
+}
 
-        let is_dir = file_type.is_some_and(|ft| ft.is_dir());
-        if is_dir {
-            continue;
-        }
+fn push_file_entry(
+    writer: &mut sevenz_rust2::ArchiveWriter<std::fs::File>,
+    fs_path: &Utf8Path,
+    archive_name: &str,
+    meta: &std::fs::Metadata,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    let mut entry = ArchiveEntry::from_path(fs_path.as_std_path(), archive_name.to_owned());
+    apply_unix_attributes(&mut entry, meta);
+    let file = fs_err::File::open(fs_path)?;
+    writer.push_archive_entry(entry, Some(file))?;
+    opts.progress.set_entry(archive_name);
+    opts.progress.inc(meta.len());
+    Ok(())
+}
 
-        let utf8_str = fs_path
-            .to_str()
-            .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?;
-        let utf8_path = Utf8Path::new(utf8_str);
+fn push_dir_entry(
+    writer: &mut sevenz_rust2::ArchiveWriter<std::fs::File>,
+    fs_path: &Utf8Path,
+    archive_name: &str,
+    meta: &std::fs::Metadata,
+) -> Result<()> {
+    let mut entry = ArchiveEntry::from_path(fs_path.as_std_path(), archive_name.to_owned());
+    apply_unix_attributes(&mut entry, meta);
+    writer.push_archive_entry::<std::fs::File>(entry, None)?;
+    Ok(())
+}
 
-        // Excludes are matched against the same string the non-VCS branch's
-        // `push_source_path` filter closure receives: the raw walked fs
-        // path, not the archive-relative name computed below. A
-        // slash-containing pattern is anchored (see `build_glob_set`), so
-        // matching a different string here would make the two branches
-        // disagree on which entries a pattern like `dir/sub/*` excludes.
-        if excludes.is_match(utf8_str) {
-            continue;
-        }
+/// Store a symlink the way p7zip does: a regular-looking entry whose content
+/// is the raw target path and whose attribute word carries `S_IFLNK` in the
+/// mode bits.  Built by hand rather than via `from_path`, which follows the
+/// link (and fails to stat a dangling one).
+fn push_symlink_entry(
+    writer: &mut sevenz_rust2::ArchiveWriter<std::fs::File>,
+    fs_path: &Utf8Path,
+    archive_name: &str,
+    link_meta: &std::fs::Metadata,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
+    let target = fs_err::read_link(fs_path)?;
+    let target_str = target
+        .to_str()
+        .ok_or_else(|| Error::InvalidUtf8Path(target.display().to_string()))?
+        .to_owned();
 
-        // Matches the naming the non-VCS path produces (`push_source_path`
-        // called with the whole directory as its root): no leading directory
-        // name, just the path relative to it.
-        let archive_name = utf8_path
-            .strip_prefix(dir)
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .to_string();
-
-        let archive_entry = ArchiveEntry::from_path(utf8_path, archive_name);
-        let file = fs_err::File::open(utf8_path)?;
-        writer.push_archive_entry(archive_entry, Some(file))?;
+    let mut entry = ArchiveEntry::new_file(archive_name);
+    if let Ok(modified) = link_meta.modified()
+        && let Ok(date) = sevenz_rust2::NtTime::try_from(modified)
+    {
+        entry.last_modified_date = date;
+        entry.has_last_modified_date = u64::from(date) > 0;
     }
+    apply_unix_attributes(&mut entry, link_meta);
+    let len = target_str.len() as u64;
+    writer.push_archive_entry(entry, Some(std::io::Cursor::new(target_str.into_bytes())))?;
+    opts.progress.set_entry(archive_name);
+    opts.progress.inc(len);
     Ok(())
 }
 
@@ -143,20 +220,23 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     // through `io::Error` would relabel every failure as an I/O error, so the
     // real error is parked here and rethrown once the walk unwinds.
     let parked: RefCell<Option<Error>> = RefCell::new(None);
+    let deferred_dirs: RefCell<Vec<(Utf8PathBuf, u32)>> = RefCell::new(Vec::new());
 
     let walked = sevenz_rust2::decompress_with_extract_fn_and_password(
         file,
         output,
         password,
-        |entry, reader, _entry_dest| match extract_entry(entry, reader, output, opts) {
-            Ok(keep_walking) => Ok(keep_walking),
-            Err(e) => {
-                let msg = e.to_string();
-                *parked.borrow_mut() = Some(e);
-                Err(sevenz_rust2::Error::Io(
-                    std::io::Error::other(msg),
-                    entry.name.clone().into(),
-                ))
+        |entry, reader, _entry_dest| {
+            match extract_entry(entry, reader, output, opts, &deferred_dirs) {
+                Ok(keep_walking) => Ok(keep_walking),
+                Err(e) => {
+                    let msg = e.to_string();
+                    *parked.borrow_mut() = Some(e);
+                    Err(sevenz_rust2::Error::Io(
+                        std::io::Error::other(msg),
+                        entry.name.clone().into(),
+                    ))
+                }
             }
         },
     );
@@ -165,6 +245,21 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
         return Err(e);
     }
     walked?;
+
+    // Directory modes recorded under -P are applied children-first after the
+    // walk, so a read-only directory entry can't block extraction of its own
+    // contents — the same deferral the tar path uses.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut dirs = deferred_dirs.into_inner();
+        dirs.sort_by(|a, b| b.0.as_str().cmp(a.0.as_str()));
+        for (path, mode) in dirs {
+            fs_err::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o7777))?;
+        }
+    }
+    #[cfg(not(unix))]
+    drop(deferred_dirs);
     Ok(())
 }
 
@@ -184,6 +279,7 @@ fn extract_entry(
     reader: &mut dyn std::io::Read,
     output: &Utf8Path,
     opts: &DecompressOpts<'_>,
+    deferred_dirs: &RefCell<Vec<(Utf8PathBuf, u32)>>,
 ) -> Result<bool> {
     crate::filter::safe_entry_path(&entry.name)?;
 
@@ -214,6 +310,12 @@ fn extract_entry(
 
     if entry.is_directory {
         fs_err::create_dir_all(&out_path)?;
+        if opts.preserve_permissions
+            && let Some(mode) = entry_unix_mode(entry)
+            && mode & 0xF000 == 0o040000
+        {
+            deferred_dirs.borrow_mut().push((out_path, mode));
+        }
         return Ok(true);
     }
 
@@ -221,7 +323,8 @@ fn extract_entry(
         fs_err::create_dir_all(parent)?;
     }
 
-    if fs_err::symlink_metadata(&out_path).is_ok() {
+    let existed = fs_err::symlink_metadata(&out_path).is_ok();
+    if existed {
         if let Some(suffix) = &opts.backup_suffix {
             let backup = Utf8PathBuf::from(format!("{out_path}{suffix}"));
             fs_err::rename(&out_path, &backup)?;
@@ -232,11 +335,79 @@ fn extract_entry(
         }
     }
 
+    // Symlink entries carry S_IFLNK in the attribute word and the target
+    // path as their content (p7zip's convention).
+    if let Some(mode) = entry_unix_mode(entry)
+        && mode & 0xF000 == 0o120000
+    {
+        return extract_symlink_entry(reader, &out_path, &dest_path, opts);
+    }
+
+    // If overwriting an existing symlink, remove it first so the new file
+    // replaces the link rather than the link's target.  Re-stat instead of
+    // reusing `existed`: the backup branch renames the original away.
+    if fs_err::symlink_metadata(&out_path)
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        fs_err::remove_file(&out_path)?;
+    }
     let mut out_file = fs_err::File::create(&out_path)?;
     let written = std::io::copy(reader, &mut out_file)?;
     restore_mtime(&out_file, entry);
+    #[cfg(unix)]
+    if opts.preserve_permissions
+        && let Some(mode) = entry_unix_mode(entry)
+        && matches!(mode & 0xF000, 0o100000 | 0)
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs_err::set_permissions(&out_path, std::fs::Permissions::from_mode(mode & 0o7777))?;
+    }
     opts.progress.set_entry(dest_path.as_str());
     opts.progress.inc(written);
+    Ok(true)
+}
+
+/// Upper bound on a symlink target this crate is willing to read — same
+/// rationale as the zip path: PATH_MAX is 4096, so anything past 8 KiB is a
+/// hostile entry, not a link.
+const MAX_SYMLINK_TARGET: u64 = 8 * 1024;
+
+/// Recreate a 7z symlink entry (content = target path) as a real symlink,
+/// with the same structural target validation the tar and zip paths apply.
+/// Presence at `out_path` is re-checked before removal — the backup branch
+/// may have renamed the original away since the caller's stat.
+fn extract_symlink_entry(
+    reader: &mut dyn std::io::Read,
+    out_path: &Utf8Path,
+    dest_path: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<bool> {
+    let mut target_bytes = Vec::new();
+    let read = std::io::copy(
+        &mut std::io::Read::take(&mut *reader, MAX_SYMLINK_TARGET),
+        &mut target_bytes,
+    )?;
+    if read >= MAX_SYMLINK_TARGET {
+        return Err(Error::SymlinkTargetTooLong {
+            path: dest_path.to_owned(),
+            max: MAX_SYMLINK_TARGET,
+        });
+    }
+    let target = std::str::from_utf8(&target_bytes)
+        .map_err(|_| Error::InvalidUtf8Path(dest_path.to_string()))?;
+
+    crate::filter::safe_link_target(dest_path.as_str(), target)?;
+
+    if fs_err::symlink_metadata(out_path).is_ok() {
+        fs_err::remove_file(out_path)?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, out_path)?;
+    #[cfg(not(unix))]
+    fs_err::write(out_path, &target_bytes)?;
+
+    opts.progress.set_entry(dest_path.as_str());
+    opts.progress.inc(target_bytes.len() as u64);
     Ok(true)
 }
 
@@ -344,11 +515,21 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for file in &archive.files {
         let path = Utf8PathBuf::from(&file.name);
+        let mtime = if file.has_last_modified_date {
+            let st: std::time::SystemTime = file.last_modified_date.into();
+            st.duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        } else {
+            0
+        };
         entries.push(Entry {
             path,
             size: file.size,
-            mtime: 0,
-            mode: 0,
+            mtime,
+            // Full st_mode from the p7zip unix extension, matching what the
+            // zip module reports from its external attributes.
+            mode: entry_unix_mode(file).unwrap_or(0),
             is_dir: file.is_directory,
         });
     }

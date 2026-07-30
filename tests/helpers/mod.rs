@@ -25,10 +25,10 @@ pub struct FormatHarness {
     pub info: fn(&Utf8Path) -> rz_archive::error::Result<rz_archive::ArchiveInfo>,
     pub ext: &'static str,
     pub format_name: &'static str,
-    /// tar-style formats preserve the top-level directory name in the archive
-    /// and require the output directory to already exist before decompressing.
-    /// 7z-style formats extract contents flat and create the output directory
-    /// themselves.
+    /// Every format now preserves the top-level directory name in the archive
+    /// (7z historically extracted contents flat before its walk was unified
+    /// with tar/zip's).  Kept as a field so a future harness entry with
+    /// different semantics stays expressible.
     pub preserves_top_dir: bool,
 }
 
@@ -100,7 +100,7 @@ pub const SEVEN_Z: FormatHarness = FormatHarness {
     info: rz_archive::seven_z::info,
     ext: ".7z",
     format_name: "7z",
-    preserves_top_dir: false,
+    preserves_top_dir: true,
 };
 
 /// Build default compress opts (no excludes, no progress).

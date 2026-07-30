@@ -34,9 +34,11 @@ fn run(args: &[&str]) -> Result<std::process::Output, Box<dyn std::error::Error>
     Ok(out)
 }
 
-/// Collect (name, mode, mtime) for every entry of an uncompressed or gzipped
-/// tar on disk.
-fn tar_entries(path: &Utf8PathBuf) -> Result<Vec<(String, u32, u64)>, Box<dyn std::error::Error>> {
+/// One tar entry's (name, mode, mtime).
+type TarEntryMeta = (String, u32, u64);
+
+/// Collect the metadata of every entry of an uncompressed or gzipped tar.
+fn tar_entries(path: &Utf8PathBuf) -> Result<Vec<TarEntryMeta>, Box<dyn std::error::Error>> {
     let raw = fs_err::read(path)?;
     let plain: Box<dyn Read> = if path.as_str().ends_with(".gz") {
         Box::new(flate2::read::MultiGzDecoder::new(std::io::Cursor::new(raw)))

@@ -7,12 +7,11 @@
 //!    filter closure against the raw walked filesystem path. A
 //!    slash-containing pattern is anchored (see `filter::build_glob_set`), so
 //!    the two branches disagreed on what a pattern like `dir/sub/*` excluded.
-//! 2. The flagged walk archived symlinks that the built-in non-flag walker
-//!    always drops (it decides whether to recurse from a non-following
-//!    `DirEntry::file_type`, so it never dereferences or surfaces a symlink,
-//!    regardless of `--follow-symlinks`). A symlink-to-file got silently
-//!    dereferenced, a symlink-to-dir became an empty directory entry with its
-//!    contents dropped, and a dangling symlink hard-failed the whole compress.
+//! 2. The flagged walk disagreed with the non-flag walk on symlinks.  Both
+//!    walks are now the same `filter::walk_dir` traversal tar and zip use, so
+//!    the property under test is simply that the flag changes *which* entries
+//!    are included (gitignore rules) and nothing else — naming, symlink
+//!    handling, and exclude semantics all stay identical.
 
 mod helpers;
 
@@ -103,22 +102,22 @@ fn exclude_pattern_with_slash_matches_the_same_entries_with_and_without_the_flag
          {with_label}={with_names:?}",
     );
     assert!(
-        !with_names.iter().any(|n| n.contains("sub1")),
-        "sub1 should have been excluded by `vcs/sub1/*` in both modes, got {with_names:?}",
+        !with_names.iter().any(|n| n.contains("sub1/")),
+        "sub1's contents should have been excluded by `vcs/sub1/*` in both \
+         modes, got {with_names:?}",
     );
     assert!(
-        with_names.iter().any(|n| n == "top.txt") && with_names.iter().any(|n| n == "sub2/dup.txt"),
+        with_names.iter().any(|n| n == "vcs/top.txt")
+            && with_names.iter().any(|n| n == "vcs/sub2/dup.txt"),
         "unrelated entries should survive the exclude, got {with_names:?}",
     );
 
     Ok(())
 }
 
-/// Pre-fix, the flagged walk (`push_dir_vcs`) dereferenced a symlink-to-file,
-/// turned a symlink-to-dir into an empty directory entry whose contents were
-/// silently dropped, and hard-failed the whole compress on a dangling
-/// symlink — none of which match the non-flag walk, which drops every
-/// symlink outright.
+/// Symlinks are stored as symlink entries (never followed, never dropped) by
+/// both walks, and a dangling symlink is archivable rather than failing the
+/// compress — matching how the tar and zip backends treat the same tree.
 #[test]
 fn symlinks_match_the_non_flag_walk_and_a_dangling_symlink_does_not_fail_compress() -> TestResult {
     let (_guard, tmp) = temp_utf8_dir()?;
@@ -138,10 +137,21 @@ fn symlinks_match_the_non_flag_walk_and_a_dangling_symlink_does_not_fail_compres
         "flagged and non-flagged walks archived a different set of entries: \
          {without_label}={without_names:?} vs {with_label}={with_names:?}",
     );
+    let expected: Vec<String> = [
+        "vcs",
+        "vcs/dangling",
+        "vcs/link_dir",
+        "vcs/link_file.txt",
+        "vcs/real.txt",
+        "vcs/realdir",
+        "vcs/realdir/inside.txt",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
     assert_eq!(
-        with_names,
-        vec!["real.txt".to_owned(), "realdir/inside.txt".to_owned()],
-        "expected only the two real files (every symlink dropped), got {with_names:?}",
+        with_names, expected,
+        "expected the full tree with symlinks stored as entries, got {with_names:?}",
     );
 
     Ok(())

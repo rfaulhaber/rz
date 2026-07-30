@@ -40,13 +40,15 @@ fn build_zip(path: &Utf8PathBuf, entries: &[(&str, bool)]) -> TestResult {
     Ok(())
 }
 
-/// Run the same extraction `runs` times against fresh output dirs, returning
-/// each (exit_code, stderr).
+/// One extraction attempt's observable outcome: exit code and stderr.
+type RunOutcome = (Option<i32>, String);
+
+/// Run the same extraction `runs` times against fresh output dirs.
 fn repeated_runs(
     tmp: &Utf8PathBuf,
     archive: &Utf8PathBuf,
     runs: usize,
-) -> Result<Vec<(Option<i32>, String)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<RunOutcome>, Box<dyn std::error::Error>> {
     let mut results = Vec::new();
     for i in 0..runs {
         let out_dir = tmp.join(format!("out{i}"));

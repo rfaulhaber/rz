@@ -9,7 +9,7 @@
 mod helpers;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::GlobSet;
 use helpers::{TestResult, temp_utf8_dir};
 use rz_archive::error::Error;
 use rz_archive::{CompressOpts, DecompressOpts, seven_z};
@@ -19,10 +19,10 @@ fn opts() -> DecompressOpts<'static> {
     DecompressOpts::new(false, 0, GlobSet::empty(), GlobSet::empty())
 }
 
-/// Build an archive holding `foo.txt`, `top.txt` and `sub/n.txt`.
+/// Build an archive holding `src/foo.txt`, `src/top.txt` and `src/sub/n.txt`.
 ///
-/// 7z stores paths relative to the input directory, so the `src/` component
-/// does not appear in the archive.
+/// 7z names entries the same way tar and zip do — prefixed with the input
+/// directory's own name.
 fn build_archive(tmp: &Utf8Path) -> Result<Utf8PathBuf, Box<dyn std::error::Error>> {
     let src = tmp.join("src");
     fs_err::create_dir_all(src.join("sub"))?;
@@ -39,11 +39,11 @@ fn build_archive(tmp: &Utf8Path) -> Result<Utf8PathBuf, Box<dyn std::error::Erro
     Ok(archive)
 }
 
-/// Create `out/` with an existing `foo.txt` to collide with the archive.
+/// Create `out/` with an existing `src/foo.txt` to collide with the archive.
 fn out_with_existing(tmp: &Utf8Path) -> Result<Utf8PathBuf, Box<dyn std::error::Error>> {
     let out = tmp.join("out");
-    fs_err::create_dir_all(&out)?;
-    fs_err::write(out.join("foo.txt"), b"PRECIOUS")?;
+    fs_err::create_dir_all(out.join("src"))?;
+    fs_err::write(out.join("src/foo.txt"), b"PRECIOUS")?;
     Ok(out)
 }
 
@@ -97,7 +97,7 @@ fn existing_file_is_not_overwritten_without_force() -> TestResult {
         matches!(result, Err(Error::FileExists(_))),
         "must refuse to clobber an existing file, got {result:?}",
     );
-    assert_eq!(fs_err::read(out.join("foo.txt"))?, b"PRECIOUS");
+    assert_eq!(fs_err::read(out.join("src/foo.txt"))?, b"PRECIOUS");
     Ok(())
 }
 
@@ -115,9 +115,9 @@ fn no_overwrite_keeps_existing_and_extracts_the_rest() -> TestResult {
     o.no_overwrite = true;
     seven_z::decompress(&archive, &out, &o)?;
 
-    assert_eq!(fs_err::read(out.join("foo.txt"))?, b"PRECIOUS");
-    assert_eq!(fs_err::read(out.join("top.txt"))?, b"top-content");
-    assert_eq!(fs_err::read(out.join("sub").join("n.txt"))?, b"nested");
+    assert_eq!(fs_err::read(out.join("src/foo.txt"))?, b"PRECIOUS");
+    assert_eq!(fs_err::read(out.join("src/top.txt"))?, b"top-content");
+    assert_eq!(fs_err::read(out.join("src/sub/n.txt"))?, b"nested");
     Ok(())
 }
 
@@ -131,8 +131,8 @@ fn backup_moves_the_existing_file_aside() -> TestResult {
     o.backup_suffix = Some(".bak".to_owned());
     seven_z::decompress(&archive, &out, &o)?;
 
-    assert_eq!(fs_err::read(out.join("foo.txt.bak"))?, b"PRECIOUS");
-    assert_eq!(fs_err::read(out.join("foo.txt"))?, b"foo-content");
+    assert_eq!(fs_err::read(out.join("src/foo.txt.bak"))?, b"PRECIOUS");
+    assert_eq!(fs_err::read(out.join("src/foo.txt"))?, b"foo-content");
     Ok(())
 }
 
@@ -150,11 +150,11 @@ fn prefix_and_rename_are_applied() -> TestResult {
     seven_z::decompress(&archive, &out, &o)?;
 
     assert_eq!(
-        fs_err::read(out.join("restore").join("v2").join("bar.txt"))?,
+        fs_err::read(out.join("restore/v2/src/bar.txt"))?,
         b"foo-content",
     );
     assert!(
-        !out.join("foo.txt").exists(),
+        !out.join("src/foo.txt").exists(),
         "unrewritten path was written"
     );
     Ok(())
@@ -176,7 +176,7 @@ fn no_directory_flattens_to_basenames() -> TestResult {
 
     assert_eq!(fs_err::read(out.join("n.txt"))?, b"nested");
     assert_eq!(fs_err::read(out.join("foo.txt"))?, b"foo-content");
-    assert!(!out.join("sub").exists(), "directory structure survived -j");
+    assert!(!out.join("src").exists(), "directory structure survived -j");
     Ok(())
 }
 
@@ -190,13 +190,14 @@ fn excluded_entry_is_drained_so_later_entries_survive() -> TestResult {
     let out = tmp.join("out");
     fs_err::create_dir_all(&out)?;
 
-    let mut builder = GlobSetBuilder::new();
-    builder.add(Glob::new("top*")?);
-    let o = DecompressOpts::new(true, 0, GlobSet::empty(), builder.build()?);
+    // Built via the CLI's own glob helper so the bare pattern matches at any
+    // depth (`**/top*`), the way `--exclude top*` behaves.
+    let excludes = rz_archive::filter::build_glob_set(&["top*".to_owned()])?;
+    let o = DecompressOpts::new(true, 0, GlobSet::empty(), excludes);
     seven_z::decompress(&archive, &out, &o)?;
 
-    assert!(!out.join("top.txt").exists(), "excluded entry was written");
-    assert_eq!(fs_err::read(out.join("foo.txt"))?, b"foo-content");
-    assert_eq!(fs_err::read(out.join("sub").join("n.txt"))?, b"nested");
+    assert!(!out.join("src/top.txt").exists(), "excluded entry was written");
+    assert_eq!(fs_err::read(out.join("src/foo.txt"))?, b"foo-content");
+    assert_eq!(fs_err::read(out.join("src/sub/n.txt"))?, b"nested");
     Ok(())
 }
