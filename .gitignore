@@ -8,3 +8,5 @@ tmp/
 target/
 result
 rust_out
+
+.claude
