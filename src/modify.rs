@@ -459,11 +459,13 @@ fn tar_compressed_writer(
 
 #[cfg(feature = "xz2")]
 fn xz_writer(writer: BufWriter<fs_err::File>, level: u32) -> Result<Box<dyn EncoderHandle>> {
+    let level = crate::tar_xz::validate_level(level)?;
     Ok(Box::new(XzHandle::new(writer, level)))
 }
 
 #[cfg(not(feature = "xz2"))]
 fn xz_writer(writer: BufWriter<fs_err::File>, level: u32) -> Result<Box<dyn EncoderHandle>> {
+    let level = crate::tar_xz::validate_level(level)?;
     Ok(Box::new(LzmaRust2XzHandle::new(writer, level)?))
 }
 

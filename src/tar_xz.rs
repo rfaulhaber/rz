@@ -6,12 +6,29 @@ use crate::error::Result;
 use crate::filter;
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
+/// Validate the requested xz preset.
+///
+/// liblzma returns `LZMA_OPTIONS_ERROR` above preset 9, which the `xz2`
+/// crate's `XzEncoder::new` unwraps into a panic; the pure-Rust backend
+/// silently clamps instead.  Both are wrong answers to a bad flag, so reject
+/// anything above 9 up front on either backend — matching `xz(1)`, whose
+/// presets end at -9.
+pub(crate) fn validate_level(level: u32) -> Result<u32> {
+    if level > 9 {
+        return Err(std::io::Error::other(format!(
+            "xz compression level must be 0..=9 (got {level})"
+        ))
+        .into());
+    }
+    Ok(level)
+}
+
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "xz2")]
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
-    let level = opts.level.unwrap_or(6);
+    let level = validate_level(opts.level.unwrap_or(6))?;
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
     let encoder = xz2::write::XzEncoder::new(buf, level);
@@ -30,7 +47,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
 #[cfg(not(feature = "xz2"))]
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
-    let level = opts.level.unwrap_or(6);
+    let level = validate_level(opts.level.unwrap_or(6))?;
     let file = fs_err::File::create(output)?;
     let buf = BufWriter::new(file);
     let encoder = lzma_rust2::XzWriter::new(buf, lzma_rust2::XzOptions::with_preset(level))?;
@@ -55,7 +72,7 @@ pub fn compress_to_writer<W: std::io::Write>(
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
-    let level = opts.level.unwrap_or(6);
+    let level = validate_level(opts.level.unwrap_or(6))?;
     let buf = BufWriter::new(writer);
     let encoder = xz2::write::XzEncoder::new(buf, level);
     let mut builder = tar::Builder::new(encoder);
@@ -77,7 +94,7 @@ pub fn compress_to_writer<W: std::io::Write>(
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
-    let level = opts.level.unwrap_or(6);
+    let level = validate_level(opts.level.unwrap_or(6))?;
     let encoder = lzma_rust2::XzWriter::new(writer, lzma_rust2::XzOptions::with_preset(level))?;
     let mut builder = tar::Builder::new(encoder);
     builder.follow_symlinks(opts.follow_symlinks);
