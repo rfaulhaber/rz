@@ -1,29 +1,11 @@
+use std::cell::RefCell;
+
 use camino::{Utf8Path, Utf8PathBuf};
 use sevenz_rust2::encoder_options::{AesEncoderOptions, Lzma2Options};
 use sevenz_rust2::{EncoderConfiguration, EncoderMethod, Password};
 
 use crate::error::{Error, Result};
 use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
-
-/// The 7z backend can use a fast, single-call extraction path when no
-/// per-entry filtering or overwrite logic is needed.  This predicate is
-/// specific to 7z because every other backend streams entries through a
-/// filter loop unconditionally.
-fn can_fast_path(opts: &DecompressOpts<'_>) -> bool {
-    // `keep_newer` and `strip_components` are rejected up-front in decompress,
-    // so we don't need to check them here.
-    // Rename/prefix rules require per-entry path rewriting, so the fast path
-    // (single-call extraction) cannot be used when they are set.
-    opts.force
-        && opts.includes.is_empty()
-        && opts.excludes.is_empty()
-        && !opts.no_overwrite
-        && !opts.no_directory
-        && opts.backup_suffix.is_none()
-        && !opts.preserve_permissions
-        && opts.renames.is_empty()
-        && opts.prefix.is_none()
-}
 
 // ── Compress ──────────────────────────────────────────────────────────────────
 
@@ -111,88 +93,130 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     if opts.keep_newer {
         return Err(Error::KeepNewerUnsupported("7z".to_owned()));
     }
-    // Use the fast path only when force is set and no filtering/special
-    // options are active.  Otherwise we need the callback to enforce
-    // overwrite guards, include/exclude, and backup logic.
-    if can_fast_path(opts) {
-        if let Some(pwd) = &opts.password {
-            let file = fs_err::File::open(input)?;
-            sevenz_rust2::decompress_with_password(file, output, Password::from(pwd.as_str()))?;
-        } else {
-            sevenz_rust2::decompress_file(input, output)?;
+    let file = fs_err::File::open(input)?;
+    let password = opts.password.as_deref().map_or_else(Password::empty, Password::from);
+
+    // sevenz-rust2's error type cannot carry one of ours, and forcing ours
+    // through `io::Error` would relabel every failure as an I/O error, so the
+    // real error is parked here and rethrown once the walk unwinds.
+    let parked: RefCell<Option<Error>> = RefCell::new(None);
+
+    let walked = sevenz_rust2::decompress_with_extract_fn_and_password(
+        file,
+        output,
+        password,
+        |entry, reader, _entry_dest| match extract_entry(entry, reader, output, opts) {
+            Ok(keep_walking) => Ok(keep_walking),
+            Err(e) => {
+                let msg = e.to_string();
+                *parked.borrow_mut() = Some(e);
+                Err(sevenz_rust2::Error::Io(
+                    std::io::Error::other(msg),
+                    entry.name.clone().into(),
+                ))
+            }
+        },
+    );
+
+    if let Some(e) = parked.into_inner() {
+        return Err(e);
+    }
+    walked?;
+    Ok(())
+}
+
+/// Resolve one 7z entry against the output root and write it out.
+///
+/// sevenz-rust2 hands the extract callback `<output>/<entry name>` — the
+/// entry's own destination, derived from the raw archive name with no traversal
+/// filtering — rather than the output root.  Every path is therefore resolved
+/// against `output` here, and `default_entry_extract_fn` is never delegated to:
+/// it would re-derive the destination from the unrewritten name, ignoring
+/// `--rename`/`--prefix` and the overwrite guards below.
+///
+/// The returned bool tells sevenz-rust2 the entry is fully handled; a skipped
+/// entry still counts as handled, so this is always `true`.
+fn extract_entry(
+    entry: &sevenz_rust2::ArchiveEntry,
+    reader: &mut dyn std::io::Read,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<bool> {
+    crate::filter::safe_entry_path(&entry.name)?;
+
+    if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
+        return skip_entry(reader);
+    }
+    if opts.no_directory && entry.is_directory {
+        return skip_entry(reader);
+    }
+
+    let base_name = if opts.no_directory {
+        match Utf8Path::new(&entry.name).file_name() {
+            Some(name) => Utf8PathBuf::from(name),
+            None => return skip_entry(reader),
         }
     } else {
-        let file = fs_err::File::open(input)?;
-        let password = opts.password.as_deref().map_or_else(Password::empty, Password::from);
-        sevenz_rust2::decompress_with_extract_fn_and_password(file, output, password, |entry, reader, dest| {
-            // Reject entries that attempt path traversal.
-            crate::filter::safe_entry_path(&entry.name).map_err(|e| {
-                sevenz_rust2::Error::Io(
-                    std::io::Error::other(e.to_string()),
-                    entry.name.clone().into(),
-                )
-            })?;
+        Utf8PathBuf::from(&entry.name)
+    };
 
-            if !crate::filter::should_extract(&entry.name, &opts.includes, &opts.excludes) {
-                return Ok(true);
-            }
-            if opts.no_directory && entry.is_directory {
-                return Ok(true);
-            }
-            let base_name = if opts.no_directory {
-                Utf8Path::new(&entry.name)
-                    .file_name()
-                    .map(camino::Utf8PathBuf::from)
-                    .unwrap_or_else(|| camino::Utf8PathBuf::from(&entry.name))
-            } else {
-                camino::Utf8PathBuf::from(&entry.name)
-            };
-            // Apply rename rules and optional prefix.
-            let rewritten = crate::filter::apply_path_rewrites(
-                base_name,
-                &opts.renames,
-                opts.prefix.as_deref(),
-            )
-            .map_err(|e| {
-                sevenz_rust2::Error::Io(
-                    std::io::Error::other(e.to_string()),
-                    entry.name.clone().into(),
-                )
-            })?;
-            if rewritten.as_str().is_empty() {
-                return Ok(true);
-            }
-            let out_name = rewritten.into_string();
-            let out_path = dest.join(&out_name);
-            if !entry.is_directory && out_path.exists() {
-                if let Some(ref suffix) = opts.backup_suffix {
-                    let backup_name = format!("{}{suffix}", out_path.display());
-                    fs_err::rename(&out_path, Utf8Path::new(&backup_name))
-                        .map_err(|e| sevenz_rust2::Error::Io(e, backup_name.into()))?;
-                } else if opts.no_overwrite {
-                    return Ok(true);
-                } else if !opts.force {
-                    let utf8 = Utf8PathBuf::from(out_path.display().to_string());
-                    let err = Error::FileExists(utf8);
-                    return Err(sevenz_rust2::Error::Io(
-                        std::io::Error::new(std::io::ErrorKind::AlreadyExists, err.to_string()),
-                        err.to_string().into(),
-                    ));
-                }
-            }
-            if opts.no_directory {
-                // Extract to flat dest with the basename only.
-                let mut out_file = fs_err::File::create(&out_path)
-                    .map_err(|e| sevenz_rust2::Error::Io(e, out_name.into()))?;
-                std::io::copy(reader, &mut out_file)
-                    .map_err(|e| sevenz_rust2::Error::Io(e, "copy".into()))?;
-                Ok(true)
-            } else {
-                sevenz_rust2::default_entry_extract_fn(entry, reader, dest)
-            }
-        })?;
+    let dest_path =
+        match crate::filter::apply_path_rewrites(base_name, &opts.renames, opts.prefix.as_deref())?
+        {
+            p if p.as_str().is_empty() => return skip_entry(reader),
+            p => p,
+        };
+
+    let out_path = output.join(&dest_path);
+
+    if entry.is_directory {
+        fs_err::create_dir_all(&out_path)?;
+        return Ok(true);
     }
-    Ok(())
+
+    if let Some(parent) = out_path.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+
+    if fs_err::symlink_metadata(&out_path).is_ok() {
+        if let Some(suffix) = &opts.backup_suffix {
+            let backup = Utf8PathBuf::from(format!("{out_path}{suffix}"));
+            fs_err::rename(&out_path, &backup)?;
+        } else if opts.no_overwrite {
+            return skip_entry(reader);
+        } else if !opts.force {
+            return Err(Error::FileExists(out_path));
+        }
+    }
+
+    let mut out_file = fs_err::File::create(&out_path)?;
+    let written = std::io::copy(reader, &mut out_file)?;
+    restore_mtime(&out_file, entry);
+    opts.progress.set_entry(dest_path.as_str());
+    opts.progress.inc(written);
+    Ok(true)
+}
+
+/// Consume an entry's payload without writing it anywhere.
+///
+/// Entry readers are bounded views over one shared solid-block stream, so an
+/// entry that is filtered out still has to be read to its end: leaving bytes
+/// behind makes every following entry in the block decode from a misaligned
+/// offset and fail its CRC check.
+fn skip_entry(reader: &mut dyn std::io::Read) -> Result<bool> {
+    std::io::copy(reader, &mut std::io::sink())?;
+    Ok(true)
+}
+
+/// Best-effort mtime restoration, matching what sevenz-rust2's default
+/// extractor does.  A filesystem that refuses the timestamp must not fail an
+/// otherwise-complete extraction.
+fn restore_mtime(file: &fs_err::File, entry: &sevenz_rust2::ArchiveEntry) {
+    if !entry.has_last_modified_date {
+        return;
+    }
+    let times = std::fs::FileTimes::new().set_modified(entry.last_modified_date.into());
+    let _ = file.file().set_times(times);
 }
 
 // ── Decompress to writer ─────────────────────────────────────────────────────
