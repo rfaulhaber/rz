@@ -71,8 +71,22 @@ fn push_dir_vcs(
     for result in crate::filter::vcs_walker(dir, opts.follow_symlinks) {
         let entry = result.map_err(|e| std::io::Error::other(e.to_string()))?;
         let fs_path = entry.path();
-        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let file_type = entry.file_type();
 
+        // A non-following walk reports a symlink's own type, never its
+        // target's. Skip it here to match the non-VCS branch below: it
+        // walks via sevenz-rust2's `collect_file_paths`, which decides
+        // whether to recurse from the raw (non-following) `DirEntry` file
+        // type and so never surfaces a symlink at all, regardless of
+        // `follow_symlinks`. Without this, a symlink-to-file was silently
+        // dereferenced, a symlink-to-dir became an empty directory entry
+        // with its contents dropped, and a dangling symlink hard-failed the
+        // whole compress.
+        if !opts.follow_symlinks && file_type.is_some_and(|ft| ft.is_symlink()) {
+            continue;
+        }
+
+        let is_dir = file_type.is_some_and(|ft| ft.is_dir());
         if is_dir {
             continue;
         }
@@ -82,6 +96,16 @@ fn push_dir_vcs(
             .ok_or_else(|| Error::InvalidUtf8Path(fs_path.display().to_string()))?;
         let utf8_path = Utf8Path::new(utf8_str);
 
+        // Excludes are matched against the same string the non-VCS branch's
+        // `push_source_path` filter closure receives: the raw walked fs
+        // path, not the archive-relative name computed below. A
+        // slash-containing pattern is anchored (see `build_glob_set`), so
+        // matching a different string here would make the two branches
+        // disagree on which entries a pattern like `dir/sub/*` excludes.
+        if excludes.is_match(utf8_str) {
+            continue;
+        }
+
         // Matches the naming the non-VCS path produces (`push_source_path`
         // called with the whole directory as its root): no leading directory
         // name, just the path relative to it.
@@ -89,10 +113,6 @@ fn push_dir_vcs(
             .strip_prefix(dir)
             .map_err(|e| std::io::Error::other(e.to_string()))?
             .to_string();
-
-        if excludes.is_match(&archive_name) {
-            continue;
-        }
 
         let archive_entry = ArchiveEntry::from_path(utf8_path, archive_name);
         let file = fs_err::File::open(utf8_path)?;
