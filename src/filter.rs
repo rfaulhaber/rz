@@ -113,6 +113,36 @@ pub fn apply_path_rewrites(
     Ok(combined)
 }
 
+/// Map an archive-relative path through the full rewrite chain an extracted
+/// entry goes through: `--strip-components`, `--no-directory` flattening, then
+/// rename rules and `--prefix`.
+///
+/// `None` means the path was stripped away or renamed to nothing, which callers
+/// treat as "skip this entry".
+pub fn resolve_entry_path(
+    path: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<Option<Utf8PathBuf>> {
+    let stripped = match strip_components(path, opts.strip_components) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let flattened = if opts.no_directory {
+        match stripped.file_name() {
+            Some(name) => Utf8PathBuf::from(name),
+            None => return Ok(None),
+        }
+    } else {
+        stripped
+    };
+
+    match apply_path_rewrites(flattened, &opts.renames, opts.prefix.as_deref())? {
+        p if p.as_str().is_empty() => Ok(None),
+        p => Ok(Some(p)),
+    }
+}
+
 // ── VCS-aware walking ───────────────────────────────────────────────────────
 
 /// Build an `ignore::Walk` iterator that respects `.gitignore` rules.
@@ -789,28 +819,9 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             continue;
         }
 
-        let stripped = match strip_components(&orig_path, opts.strip_components) {
+        let dest_path = match resolve_entry_path(&orig_path, opts)? {
             Some(p) => p,
             None => continue,
-        };
-
-        let dest_path = if opts.no_directory {
-            match stripped.file_name() {
-                Some(name) => Utf8PathBuf::from(name),
-                None => continue,
-            }
-        } else {
-            stripped
-        };
-
-        // Apply rename rules and optional prefix.
-        let dest_path = match apply_path_rewrites(
-            dest_path,
-            &opts.renames,
-            opts.prefix.as_deref(),
-        )? {
-            p if p.as_str().is_empty() => continue,
-            p => p,
         };
 
         let dest = output.join(&dest_path);
@@ -841,9 +852,54 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
 
         opts.progress.set_entry(dest_path.as_str());
         let size = entry.header().size().unwrap_or(0);
-        entry.unpack(&dest)?;
+        if entry_type == tar::EntryType::Link {
+            unpack_hard_link(&entry, output, &dest, opts)?;
+        } else {
+            entry.unpack(&dest)?;
+        }
         opts.progress.inc(size);
     }
+    Ok(())
+}
+
+/// Create a hard link entry, resolving its target inside the output directory.
+///
+/// `Entry::unpack` only resolves hard-link targets against an output root when
+/// the entry came from `unpack_in`, which populates tar-rs's `target_base`.
+/// Called directly it hands the raw target to `hard_link(2)`, which resolves it
+/// against the *process working directory* — so `y -> x` links to whatever `x`
+/// happens to be next to the caller, and writes through the link reach a file
+/// outside the output tree entirely.  `safe_link_target` cannot catch that: a
+/// bare relative name has no `..` and no leading `/`.
+///
+/// The target goes through the same rewrite chain as the entry path, so
+/// `--strip-components` and `--rename` leave the link pointing at the archive's
+/// own copy rather than at a path that no longer exists.
+fn unpack_hard_link<R: std::io::Read>(
+    entry: &tar::Entry<'_, R>,
+    output: &Utf8Path,
+    dest: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
+    let target = entry
+        .link_name()?
+        .ok_or_else(|| Error::Io(std::io::Error::other("hard link entry has no link name")))?;
+    let target = Utf8PathBuf::try_from(target.into_owned())
+        .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+
+    let resolved = resolve_entry_path(&target, opts)?.ok_or_else(|| {
+        Error::Io(std::io::Error::other(format!(
+            "hard link target `{target}` is removed by the active path rewrites"
+        )))
+    })?;
+
+    // hard_link(2) refuses an existing destination, and unlike the symlink
+    // branch tar-rs never retries.  Reaching here with `dest` present means the
+    // overwrite guard already cleared us to replace it.
+    if fs_err::symlink_metadata(dest).is_ok() {
+        fs_err::remove_file(dest)?;
+    }
+    fs_err::hard_link(output.join(resolved), dest)?;
     Ok(())
 }
 
