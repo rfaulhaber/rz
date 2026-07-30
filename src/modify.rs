@@ -1004,9 +1004,10 @@ fn zip_rewrite_with(
         dst.raw_copy_file(raw)?;
     }
 
+    let (method, level) = crate::zip::compression_settings(opts.level);
     let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(opts.level.map(i64::from));
+        .compression_method(method)
+        .compression_level(level);
 
     for entry in planned {
         match entry {

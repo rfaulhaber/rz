@@ -220,6 +220,39 @@ fn zip_update_rewrites_changed_entry_once() -> TestResult {
 }
 
 #[test]
+fn zip_append_level_zero_stores_entry() -> TestResult {
+    let (_g, tmp) = temp_utf8_dir()?;
+    let a = tmp.join("a.txt");
+    fs_err::write(&a, b"alpha\n")?;
+
+    let archive = tmp.join("ar.zip");
+    (ZIP.compress)(
+        std::slice::from_ref(&a),
+        &archive,
+        &default_compress_opts(None),
+    )?;
+
+    let b = tmp.join("b.txt");
+    fs_err::write(&b, b"bravo\n")?;
+    let out = run(&["append", archive.as_str(), "--level", "0", b.as_str()])?;
+    assert!(
+        out.status.success(),
+        "append --level 0 failed: {}",
+        stderr_of(&out),
+    );
+
+    let file = fs_err::File::open(&archive)?;
+    let mut zip = ::zip::ZipArchive::new(file)?;
+    let entry = zip.by_name("b.txt")?;
+    assert_eq!(
+        entry.compression(),
+        ::zip::CompressionMethod::Stored,
+        "level 0 must store the appended entry uncompressed",
+    );
+    Ok(())
+}
+
+#[test]
 fn zip_append_adds_new_and_replaces_existing() -> TestResult {
     let (_g, tmp) = temp_utf8_dir()?;
     let a = tmp.join("a.txt");
