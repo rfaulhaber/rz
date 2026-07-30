@@ -1174,6 +1174,7 @@ fn run_convert(
 }
 
 fn print_formats(json: bool) -> Result<()> {
+    use clap::ValueEnum;
     use serde::Serialize;
 
     #[derive(Serialize)]
@@ -1191,58 +1192,44 @@ fn print_formats(json: bool) -> Result<()> {
         status: OutputStatus,
     }
 
-    let formats = vec![
-        OutputFormat {
-            format: "tar".into(),
-            extension: ".tar".into(),
-            backend: None,
-            status: OutputStatus::Enabled,
-        },
-        OutputFormat {
-            format: "tar-gz".into(),
-            extension: ".tar.gz".into(),
-            backend: Some("flate2".into()),
-            status: OutputStatus::Enabled,
-        },
-        OutputFormat {
-            format: "tar-zst".into(),
-            extension: ".tar.zst".into(),
-            backend: Some("ruzstd".into()),
-            status: OutputStatus::Enabled,
-        },
-        OutputFormat {
-            format: "tar-cz".into(),
-            extension: ".tar.xz".into(),
-            backend: Some(if cfg!(feature = "xz2") {
-                "xz2 (C)".into()
-            } else {
-                "lzma-rust2".into()
-            }),
-            status: OutputStatus::Enabled,
-        },
-        OutputFormat {
-            format: "tar-bz2".into(),
-            extension: ".tar.bz2".into(),
-            backend: Some("bzip2".into()),
-            status: if cfg!(feature = "bzip2") {
-                OutputStatus::Enabled
-            } else {
-                OutputStatus::Disabled
-            },
-        },
-        OutputFormat {
-            format: "zip".into(),
-            extension: ".zip".into(),
-            backend: Some("zip".into()),
-            status: OutputStatus::Enabled,
-        },
-        OutputFormat {
-            format: "7z".into(),
-            extension: ".7z".into(),
-            backend: Some("sevenz-rust2".into()),
-            status: OutputStatus::Enabled,
-        },
-    ];
+    // Built from the `Format` variants so the listed ids and extensions are
+    // the exact strings `--format` accepts and `from_path` recognises — a
+    // hand-written table here once drifted (`tar-cz`) and fed users an id the
+    // parser rejects.
+    let formats: Vec<OutputFormat> = Format::value_variants()
+        .iter()
+        .map(|fmt| {
+            let (backend, status) = match fmt {
+                Format::Zip => (Some("zip"), OutputStatus::Enabled),
+                Format::Tar => (None, OutputStatus::Enabled),
+                Format::TarGz => (Some("flate2"), OutputStatus::Enabled),
+                Format::TarZst => (Some("ruzstd"), OutputStatus::Enabled),
+                Format::TarXz => (
+                    Some(if cfg!(feature = "xz2") {
+                        "xz2 (C)"
+                    } else {
+                        "lzma-rust2"
+                    }),
+                    OutputStatus::Enabled,
+                ),
+                Format::TarBz2 => (
+                    Some("bzip2 (C)"),
+                    if cfg!(feature = "bzip2") {
+                        OutputStatus::Enabled
+                    } else {
+                        OutputStatus::Disabled
+                    },
+                ),
+                Format::SevenZ => (Some("sevenz-rust2"), OutputStatus::Enabled),
+            };
+            OutputFormat {
+                format: fmt.to_string(),
+                extension: fmt.extension().to_owned(),
+                backend: backend.map(str::to_owned),
+                status,
+            }
+        })
+        .collect();
 
     if json {
         let mut stdout = std::io::stdout().lock();
