@@ -1100,6 +1100,64 @@ fn plan_zip_entries(
     Ok(planned)
 }
 
+/// Carry one archived entry into a rewrite's output.
+///
+/// `raw_copy_file` rebuilds the entry options from `ZipFile::options()`, whose
+/// `unix_permissions` masks the mode to `0o777` before the writer re-ORs
+/// `S_IFREG` — flattening a carried symlink into a regular file whose content
+/// is the target path, and a directory entry into a zero-length regular file.
+/// Those two kinds are re-written through the typed APIs (`add_symlink` /
+/// `add_directory`), which set the right type bits; everything else keeps the
+/// verbatim compressed-bytes copy.  An encrypted symlink cannot be re-read
+/// without its password, so it falls back to the raw copy.
+fn carry_zip_entry<R, W>(
+    src: &mut zip::ZipArchive<R>,
+    index: usize,
+    dst: &mut zip::ZipWriter<W>,
+) -> Result<()>
+where
+    R: Read + std::io::Seek,
+    W: Write + std::io::Seek,
+{
+    let raw = src.by_index_raw(index)?;
+    let name = raw.name().to_owned();
+    let mode = raw.unix_mode();
+    let mtime = raw.last_modified().filter(zip::DateTime::is_valid);
+    let is_dir = raw.is_dir();
+    let rewrite_symlink = raw.is_symlink() && !raw.encrypted();
+    drop(raw);
+
+    let mut options = zip::write::SimpleFileOptions::default();
+    if let Some(dt) = mtime {
+        options = options.last_modified_time(dt);
+    }
+    if let Some(mode) = mode {
+        options = options.unix_permissions(mode);
+    }
+
+    if is_dir {
+        dst.add_directory(name, options)?;
+    } else if rewrite_symlink {
+        let entry = src.by_index(index)?;
+        let mut target = Vec::new();
+        entry
+            .take(crate::zip::MAX_SYMLINK_TARGET + 1)
+            .read_to_end(&mut target)?;
+        if target.len() as u64 > crate::zip::MAX_SYMLINK_TARGET {
+            return Err(Error::SymlinkTargetTooLong {
+                path: name.into(),
+                max: crate::zip::MAX_SYMLINK_TARGET,
+            });
+        }
+        let target = String::from_utf8(target)
+            .map_err(|e| Error::InvalidUtf8Path(String::from_utf8_lossy(e.as_bytes()).into_owned()))?;
+        dst.add_symlink(name, target, options)?;
+    } else {
+        dst.raw_copy_file(src.by_index_raw(index)?)?;
+    }
+    Ok(())
+}
+
 /// Copy every archived entry the plan does not supersede into `tmp`, write the
 /// planned entries after them, then rename `tmp` over `archive`.
 fn zip_rewrite_with(
@@ -1116,13 +1174,11 @@ fn zip_rewrite_with(
     let mut dst = zip::ZipWriter::new(out_file);
 
     for i in 0..src.len() {
-        // Raw copies carry the compressed bytes over verbatim — no
-        // recompression of entries the user did not touch.
-        let raw = src.by_index_raw(i)?;
-        if superseded.contains(raw.name().trim_end_matches('/')) {
+        let skip = superseded.contains(src.by_index_raw(i)?.name().trim_end_matches('/'));
+        if skip {
             continue;
         }
-        dst.raw_copy_file(raw)?;
+        carry_zip_entry(&mut src, i, &mut dst)?;
     }
 
     let (method, level) = crate::zip::compression_settings(opts.level);
@@ -1183,14 +1239,11 @@ fn zip_remove_into(archive: &Utf8Path, tmp: &Utf8Path, glob: &GlobSet) -> Result
     let mut dst = zip::ZipWriter::new(out_file);
 
     for i in 0..src.len() {
-        // Use raw_by_index so we copy through compressed bytes — keeps
-        // entry data identical (no recompression) and is much faster.
-        let raw = src.by_index_raw(i)?;
-        let name = raw.name().to_owned();
+        let name = src.by_index_raw(i)?.name().to_owned();
         if glob.is_match(name.trim_end_matches('/')) {
             continue;
         }
-        dst.raw_copy_file(raw)?;
+        carry_zip_entry(&mut src, i, &mut dst)?;
     }
 
     let file = dst.finish()?;

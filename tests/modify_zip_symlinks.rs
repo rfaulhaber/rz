@@ -94,10 +94,77 @@ fn update_keeps_symlink_a_symlink() -> TestResult {
     // ...then freshen the link so update rewrites it.
     let newer = filetime::FileTime::from_unix_time(1_700_000_000, 0);
     filetime::set_symlink_file_times(tree.join("link").as_std_path(), newer, newer)?;
+    let before = fs_err::read(tmp.join("arc.zip"))?;
     run(&tmp, &["update", "arc.zip", "tree"])?;
+    assert_ne!(
+        fs_err::read(tmp.join("arc.zip"))?,
+        before,
+        "the freshened link must actually be rewritten — a no-op update \
+         would only re-test the compress-side output",
+    );
 
     run(&tmp, &["decompress", "arc.zip", "-o", "out", "-F"])?;
     assert_extracted_symlink(&tmp.join("out/tree/link"), "real.txt")?;
+    Ok(())
+}
+
+/// The carry side of the rewrite: entries the plan does *not* touch must
+/// survive appends and removes intact.  `raw_copy_file` flattens symlink
+/// entries into regular files holding the target path (its rebuilt options
+/// mask the mode to 0o777 and re-OR S_IFREG), so untouched kinds are
+/// re-written through the typed APIs instead.
+#[test]
+fn append_and_remove_preserve_existing_symlink_entries() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let tree = tmp.join("tree");
+    fs_err::create_dir_all(&tree)?;
+    fs_err::write(tree.join("real.txt"), "real")?;
+    std::os::unix::fs::symlink("real.txt", tree.join("link"))?;
+    run(&tmp, &["compress", "tree", "-o", "arc.zip"])?;
+
+    fs_err::write(tmp.join("extra.txt"), "extra")?;
+    run(&tmp, &["append", "arc.zip", "extra.txt"])?;
+    run(&tmp, &["decompress", "arc.zip", "-o", "out1", "-F"])?;
+    assert_extracted_symlink(&tmp.join("out1/tree/link"), "real.txt")?;
+
+    run(&tmp, &["remove", "arc.zip", "extra.txt"])?;
+    run(&tmp, &["decompress", "arc.zip", "-o", "out2", "-F"])?;
+    assert_extracted_symlink(&tmp.join("out2/tree/link"), "real.txt")?;
+    Ok(())
+}
+
+/// Carried-over directory entries must keep S_IFDIR in their mode word;
+/// the raw copy used to relabel them as regular files.
+#[test]
+fn append_preserves_directory_entry_modes() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let tree = tmp.join("tree");
+    fs_err::create_dir_all(&tree)?;
+    fs_err::write(tree.join("real.txt"), "real")?;
+    run(&tmp, &["compress", "tree", "-o", "arc.zip"])?;
+
+    fs_err::write(tmp.join("extra.txt"), "extra")?;
+    run(&tmp, &["append", "arc.zip", "extra.txt"])?;
+
+    let out = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["list", "arc.zip", "--json"])
+        .output()?;
+    assert!(out.status.success());
+    let entries: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+    let dir = entries
+        .as_array()
+        .and_then(|a| {
+            a.iter()
+                .find(|e| e["path"].as_str().map(|p| p.trim_end_matches('/')) == Some("tree"))
+        })
+        .ok_or("no tree entry in listing")?;
+    let mode = dir["mode"].as_u64().ok_or("no mode")?;
+    assert_eq!(
+        mode & 0o170000,
+        0o040000,
+        "directory entry lost S_IFDIR: mode {mode:o}",
+    );
     Ok(())
 }
 

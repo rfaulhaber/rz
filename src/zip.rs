@@ -212,6 +212,17 @@ pub(crate) fn write_symlink_entry<'k, W: io::Write + io::Seek>(
     let target_str = target
         .to_str()
         .ok_or_else(|| Error::InvalidUtf8Path(target.display().to_string()))?;
+    // Stamp the link's own mtime; the default would record the moment of
+    // compression.  The mode is left to the crate (S_IFLNK | 0o777) — see the
+    // doc comment.
+    let options = match fs_err::symlink_metadata(link_path)
+        .ok()
+        .as_ref()
+        .and_then(zip_datetime_from_meta)
+    {
+        Some(dt) => options.last_modified_time(dt),
+        None => options,
+    };
     zip.add_symlink_from_path(archive_name, target_str, options)?;
     opts.progress.set_entry(archive_name);
     opts.progress.inc(target_str.len() as u64);
@@ -223,7 +234,7 @@ pub(crate) fn write_symlink_entry<'k, W: io::Write + io::Seek>(
 /// Linux caps symlink targets at PATH_MAX (4096) and every other platform is
 /// stricter, so double that is generous for anything legitimate while keeping
 /// a hostile entry from becoming an unbounded read.
-const MAX_SYMLINK_TARGET: u64 = 8 * 1024;
+pub(crate) const MAX_SYMLINK_TARGET: u64 = 8 * 1024;
 
 /// Extract a zip symlink entry to `out_path`.
 ///
