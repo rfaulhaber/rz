@@ -11,7 +11,20 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let inputs = crate::filter::validate_inputs(inputs, opts)?;
+    let result = compress_validated(&inputs, output, opts);
+    if result.is_err() {
+        // A failure part-way through leaves a truncated, unreadable archive
+        // at the output path — same cleanup the zip path does.
+        let _ = fs_err::remove_file(output);
+    }
+    result
+}
 
+fn compress_validated(
+    inputs: &[Utf8PathBuf],
+    output: &Utf8Path,
+    opts: &CompressOpts<'_>,
+) -> Result<()> {
     let mut writer = sevenz_rust2::ArchiveWriter::create(output)?;
 
     // Resolve the compression method from the requested level: 0 (or `--store`,
@@ -44,7 +57,7 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     // equal-named children of multiple inputs silently collided), never
     // surfaced symlinks, and ignored `follow_symlinks` entirely.  Excludes
     // now match archive-relative names, also like tar and zip.
-    for input in &inputs {
+    for input in inputs {
         let meta = crate::filter::input_metadata(input, opts.follow_symlinks)?;
         let name = crate::filter::input_base_name(input)?;
         if opts.excludes.is_match(&name) {
