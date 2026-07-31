@@ -40,25 +40,42 @@ pub(crate) fn with_unix_mode<'k>(
 }
 
 /// Convert a filesystem mtime into a zip `DateTime` (UTC components, the
-/// inverse of [`zip_datetime_to_epoch`]).  `None` when the metadata carries no
-/// usable time or it falls outside the representable 1980–2107 DOS range.
+/// inverse of [`zip_datetime_to_epoch`]).  `None` only when the metadata
+/// carries no usable time at all.
+///
+/// Timestamps outside the representable 1980–2107 DOS range clamp to the
+/// nearest bound (Info-ZIP behaviour).  Returning `None` there would fall
+/// back to the crate default — which stamps the wall clock at write time, so
+/// a pre-1980 source mtime came out as "now", off by decades and different
+/// on every run.
 fn zip_datetime_from_meta(meta: &std::fs::Metadata) -> Option<zip::DateTime> {
-    let secs = meta
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    let odt = time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).ok()?).ok()?;
-    zip::DateTime::from_date_and_time(
-        odt.year().try_into().ok()?,
-        odt.month() as u8,
-        odt.day(),
-        odt.hour(),
-        odt.minute(),
-        odt.second(),
-    )
-    .ok()
+    // A pre-epoch mtime makes duration_since fail; clamp it like any other
+    // pre-1980 value instead of losing it.
+    let secs = match meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    };
+    let dt = time::OffsetDateTime::from_unix_timestamp(secs)
+        .ok()
+        .and_then(|odt| {
+            zip::DateTime::from_date_and_time(
+                odt.year().try_into().ok()?,
+                odt.month() as u8,
+                odt.day(),
+                odt.hour(),
+                odt.minute(),
+                odt.second(),
+            )
+            .ok()
+        });
+    dt.or_else(|| {
+        // 1980-01-01T00:00:00Z, the DOS floor (`DateTime::default()`).
+        if secs < 315_532_800 {
+            Some(zip::DateTime::default())
+        } else {
+            zip::DateTime::from_date_and_time(2107, 12, 31, 23, 59, 58).ok()
+        }
+    })
 }
 
 /// Translate a requested compression level into the method/level pair the
@@ -304,11 +321,12 @@ fn extract_symlink_entry(
 // ── Decompress ────────────────────────────────────────────────────────────────
 
 pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>) -> Result<()> {
-    let (groups, shared_metadata) = {
+    let (groups, dir_modes, shared_metadata) = {
         let file = fs_err::File::open(input)?;
         let mut archive = ZipArchive::new(file)?;
         let metadata = archive.metadata();
-        (plan_destinations(&mut archive, opts)?, metadata)
+        let (groups, dir_modes) = plan_destinations(&mut archive, opts)?;
+        (groups, dir_modes, metadata)
     };
 
     // A *file* destined for `x` alongside any entry destined for `x/…`
@@ -323,8 +341,9 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
         let mut archive = ZipArchive::new(file)?;
         let mut jobs: Vec<(usize, Utf8PathBuf)> = groups
             .into_iter()
-            .flat_map(|(dest, indices, _)| {
-                indices.into_iter().map(move |i| (i, dest.clone()))
+            .flat_map(|group| {
+                let dest = group.dest;
+                group.indices.into_iter().map(move |i| (i, dest.clone()))
             })
             .collect();
         jobs.sort_by_key(|(i, _)| *i);
@@ -338,7 +357,7 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
                 opts.password.as_deref(),
             )?;
         }
-        return Ok(());
+        return restore_dir_modes(dir_modes, output, opts);
     }
 
     let password = opts.password.clone();
@@ -348,15 +367,15 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             // SAFETY: metadata was parsed from the same file.
             Some(unsafe { ZipArchive::unsafe_new_with_metadata(file, shared_metadata.clone()) })
         },
-        |maybe_archive, (dest_path, indices, _)| -> Result<()> {
+        |maybe_archive, group| -> Result<()> {
             let archive = maybe_archive
                 .as_mut()
                 .ok_or_else(|| Error::Io(io::Error::other("failed to open zip archive")))?;
-            for index in indices {
+            for index in group.indices {
                 extract_entry(
                     archive,
                     index,
-                    &dest_path,
+                    &group.dest,
                     output,
                     opts,
                     password.as_deref(),
@@ -365,7 +384,51 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
             Ok(())
         },
     )?;
+    restore_dir_modes(dir_modes, output, opts)
+}
+
+/// Apply recorded directory modes after extraction, children first, under
+/// `-P` — the deferral the tar and 7z paths already do.  Directory entries
+/// used to return from `extract_entry` before any permission handling, so a
+/// 0700 directory in a zip came out at the umask default.
+fn restore_dir_modes(
+    dir_modes: Vec<(Utf8PathBuf, u32)>,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+) -> Result<()> {
+    if !opts.preserve_permissions {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut dirs = dir_modes;
+        dirs.sort_by(|a, b| b.0.as_str().cmp(&a.0.as_str()));
+        for (dest, mode) in dirs {
+            let path = output.join(dest);
+            // Skip anything that is no longer a real directory — chmod
+            // follows symlinks.
+            if !fs_err::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) {
+                continue;
+            }
+            fs_err::set_permissions(&path, std::fs::Permissions::from_mode(mode & 0o7777))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir_modes, output);
+    }
     Ok(())
+}
+
+/// One planned destination: the archive indices writing to it, and whether
+/// any of them are non-directory / directory entries (both flags feed the
+/// ancestor-conflict check).
+struct DestGroup {
+    dest: Utf8PathBuf,
+    indices: Vec<usize>,
+    has_file: bool,
+    has_dir: bool,
 }
 
 /// Detect a destination that is a strict path ancestor of another destination
@@ -376,11 +439,17 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
 /// between `x` and `x/y`), so checking consecutive pairs finds an ancestor
 /// pair iff one exists.  Directory-only ancestors (`d/` before `d/f`) are the
 /// normal shape of every archive and stay on the parallel path.
-fn has_ancestor_conflict(groups: &[(Utf8PathBuf, Vec<usize>, bool)]) -> bool {
+///
+/// A directory entry and a file entry colliding on one destination (`a/` and
+/// `a` — the same path after trailing-slash canonicalization) are the
+/// degenerate ancestor pair at zero distance: they share a group, so the
+/// pair never shows up in a window and needs its own check.
+fn has_ancestor_conflict(groups: &[DestGroup]) -> bool {
+    if groups.iter().any(|g| g.has_file && g.has_dir) {
+        return true;
+    }
     groups.windows(2).any(|w| match w {
-        [(ancestor, _, has_file), (descendant, _, _)] => {
-            *has_file && descendant.starts_with(ancestor)
-        }
+        [ancestor, descendant] => ancestor.has_file && descendant.dest.starts_with(&ancestor.dest),
         _ => false,
     })
 }
@@ -397,28 +466,40 @@ fn has_ancestor_conflict(groups: &[(Utf8PathBuf, Vec<usize>, bool)]) -> bool {
 fn plan_destinations(
     archive: &mut ZipArchive<fs_err::File>,
     opts: &DecompressOpts<'_>,
-) -> Result<Vec<(Utf8PathBuf, Vec<usize>, bool)>> {
-    // Value: (indices, group receives at least one non-directory entry) —
-    // the flag feeds the ancestor-conflict check in `decompress`.
-    let mut groups: BTreeMap<Utf8PathBuf, (Vec<usize>, bool)> = BTreeMap::new();
+) -> Result<(Vec<DestGroup>, Vec<(Utf8PathBuf, u32)>)> {
+    let mut groups: BTreeMap<Utf8PathBuf, (Vec<usize>, bool, bool)> = BTreeMap::new();
+    // Directory modes for the post-extraction restore pass — the mode word
+    // comes from the central directory, so collecting it here is free.
+    let mut dir_modes: Vec<(Utf8PathBuf, u32)> = Vec::new();
     for index in 0..archive.len() {
         // Raw access: names and directory-ness come from the central directory,
         // so planning costs no decompression and needs no password.
         let entry = archive.by_index_raw(index)?;
         let name = Utf8PathBuf::from(entry.name());
         let is_dir = entry.is_dir();
+        let unix_mode = entry.unix_mode();
         drop(entry);
 
         if let Some(dest) = resolve_destination(&name, is_dir, opts)? {
+            if is_dir && let Some(mode) = unix_mode {
+                dir_modes.push((dest.clone(), mode));
+            }
             let group = groups.entry(dest).or_default();
             group.0.push(index);
             group.1 |= !is_dir;
+            group.2 |= is_dir;
         }
     }
-    Ok(groups
+    let groups = groups
         .into_iter()
-        .map(|(dest, (indices, has_file))| (dest, indices, has_file))
-        .collect())
+        .map(|(dest, (indices, has_file, has_dir))| DestGroup {
+            dest,
+            indices,
+            has_file,
+            has_dir,
+        })
+        .collect();
+    Ok((groups, dir_modes))
 }
 
 /// Run one entry name through the filter and rewrite chain, yielding its

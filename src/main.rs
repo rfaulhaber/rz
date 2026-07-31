@@ -1347,16 +1347,16 @@ fn run_convert(
 
 /// Stamp source-archive mtimes onto the extracted tempdir tree.
 ///
-/// Entries with mtime 0 (unrecorded — 7z listings, or genuinely epoch-stamped
-/// reproducible archives, which the extractor already restored) are skipped,
-/// as are entries missing on disk.  Symlinks get `set_symlink_file_times` so
-/// the link itself is stamped, not its target.  Setting a child's mtime does
-/// not touch its parent directory's, so ordering is irrelevant here.
+/// mtime 0 is stamped too: it is a real value in epoch-stamped reproducible
+/// tars (and tar-rs's extractor writes such entries back as mtime 1, so
+/// skipping would leave the drift in place).  For formats where 0 means
+/// "unrecorded" (7z without dates) the entry deterministically becomes epoch
+/// rather than the conversion wall-clock.  Entries missing on disk are
+/// skipped.  Symlinks get `set_symlink_file_times` so the link itself is
+/// stamped, not its target.  Setting a child's mtime does not touch its
+/// parent directory's, so ordering is irrelevant here.
 fn restore_entry_mtimes(tmp_dir: &Utf8Path, entries: &[rz_archive::Entry]) -> Result<()> {
     for entry in entries {
-        if entry.mtime == 0 {
-            continue;
-        }
         let path = tmp_dir.join(entry.path.as_str().trim_end_matches('/'));
         let Ok(meta) = fs_err::symlink_metadata(&path) else {
             continue;

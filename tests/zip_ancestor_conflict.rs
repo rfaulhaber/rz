@@ -142,3 +142,76 @@ fn directory_ancestors_stay_extractable() -> TestResult {
     assert!(out_dir.join("d/sub/g").as_std_path().is_file());
     Ok(())
 }
+
+/// `a/` (dir) and `a` (file) canonicalize to the same destination and share
+/// one group, so the conflict never appears between *consecutive* groups —
+/// it must be caught inside the group, or the archive stays parallel and
+/// leaves a different partial tree on every run.
+#[test]
+fn dir_vs_file_same_destination_is_deterministic() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let archive = tmp.join("dirfile.zip");
+    let mut entries: Vec<(String, bool)> = vec![("a/".to_owned(), true), ("a".to_owned(), false)];
+    // Enough filler to keep several rayon workers busy while the conflict
+    // races, if it is ever allowed to race again.
+    for i in 0..80 {
+        entries.push((format!("f{i:03}.txt"), false));
+    }
+    let borrowed: Vec<(&str, bool)> = entries.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+    build_zip(&archive, &borrowed)?;
+
+    let mut outcomes: Vec<(Option<i32>, String, Vec<String>)> = Vec::new();
+    for i in 0..12 {
+        let out_dir = tmp.join(format!("dvf{i}"));
+        let out = Command::new(rz_bin())
+            .args([
+                "--threads",
+                "8",
+                "decompress",
+                archive.as_str(),
+                "-o",
+                out_dir.as_str(),
+            ])
+            .output()?;
+        let stderr =
+            String::from_utf8_lossy(&out.stderr).replace(out_dir.as_str(), "<out>");
+        let mut on_disk: Vec<String> = walkdir_paths(&out_dir)?;
+        on_disk.sort();
+        outcomes.push((out.status.code(), stderr, on_disk));
+    }
+    let first = outcomes.first().ok_or("no runs")?.clone();
+    for (code, stderr, on_disk) in &outcomes {
+        assert_eq!(*code, first.0, "exit status must be deterministic");
+        assert_eq!(stderr, &first.1, "failure message must be deterministic");
+        assert_eq!(
+            on_disk, &first.2,
+            "the on-disk result must be identical on every run",
+        );
+    }
+    Ok(())
+}
+
+/// Every path under `root`, relative to it; empty when `root` is missing.
+fn walkdir_paths(root: &Utf8PathBuf) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    fn walk(
+        root: &Utf8PathBuf,
+        dir: &Utf8PathBuf,
+        acc: &mut Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for entry in fs_err::read_dir(dir)? {
+            let entry = entry?;
+            let p = Utf8PathBuf::try_from(entry.path())
+                .map_err(|e| format!("non-UTF-8 path: {e}"))?;
+            acc.push(p.strip_prefix(root).map_err(|e| e.to_string())?.to_string());
+            if entry.file_type()?.is_dir() {
+                walk(root, &p, acc)?;
+            }
+        }
+        Ok(())
+    }
+    let mut acc = Vec::new();
+    if fs_err::metadata(root).is_ok() {
+        walk(root, root, &mut acc)?;
+    }
+    Ok(acc)
+}

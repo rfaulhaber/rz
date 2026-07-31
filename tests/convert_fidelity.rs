@@ -149,3 +149,89 @@ fn zip_stores_and_convert_carries_source_mtimes() -> TestResult {
     assert_eq!(find(&tar_entries(&out)?, "a.txt")?.2, T as u64);
     Ok(())
 }
+
+/// Directory entries used to return from the zip extractor before any
+/// permission handling, so a 0700 directory in a zip came out at the umask
+/// default (world-readable) through both `decompress -P` and convert.
+#[cfg(unix)]
+#[test]
+fn zip_sources_preserve_directory_modes() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_guard, tmp) = temp_dir()?;
+    let tree = tmp.join("d");
+    fs_err::create_dir_all(tree.join("secret"))?;
+    fs_err::write(tree.join("secret/f.txt"), "x")?;
+    fs_err::set_permissions(tree.join("secret"), std::fs::Permissions::from_mode(0o700))?;
+
+    let src = tmp.join("src.zip");
+    run(&["compress", tree.as_str(), "-o", src.as_str()])?;
+
+    // Plain extraction under -P.
+    let out_dir = tmp.join("out");
+    run(&["decompress", src.as_str(), "-o", out_dir.as_str(), "-P"])?;
+    let mode = fs_err::metadata(out_dir.join("d/secret"))?.permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700, "decompress -P must restore zip directory modes");
+
+    // And through convert into tar.
+    let out = tmp.join("out.tar");
+    run(&["convert", src.as_str(), "-o", out.as_str()])?;
+    let entries = tar_entries(&out)?;
+    let (_, mode, _) = find(&entries, "secret")?;
+    assert_eq!(
+        mode & 0o777,
+        0o700,
+        "directory mode must survive zip → tar conversion",
+    );
+    Ok(())
+}
+
+/// Out-of-DOS-range mtimes clamp to the 1980 floor when writing zip; the
+/// crate default would stamp the conversion wall-clock, off by decades and
+/// different on every run.
+#[test]
+fn pre_1980_mtimes_clamp_to_the_dos_floor_in_zip() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let tree = tmp.join("pre");
+    fs_err::create_dir_all(&tree)?;
+    fs_err::write(tree.join("old.txt"), "x")?;
+    let t = filetime::FileTime::from_unix_time(170_856_000, 0); // 1975
+    filetime::set_file_times(tree.join("old.txt").as_std_path(), t, t)?;
+
+    let src = tmp.join("src.tar");
+    run(&["compress", tree.as_str(), "-o", src.as_str()])?;
+    let out = tmp.join("out.zip");
+    run(&["convert", src.as_str(), "-o", out.as_str()])?;
+
+    let listing = run(&["list", "--json", out.as_str()])?;
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&listing.stdout)?;
+    let mtime = rows
+        .iter()
+        .find(|r| r["path"].as_str().is_some_and(|p| p.ends_with("old.txt")))
+        .and_then(|r| r["mtime"].as_u64())
+        .ok_or("old.txt missing from listing")?;
+    assert_eq!(mtime, 315_532_800, "1975 must clamp to 1980-01-01, not 'now'");
+    Ok(())
+}
+
+/// mtime 0 is a real value in epoch-stamped reproducible tars; the restore
+/// pass used to skip it, leaving tar-rs's mtime-1 write in place.
+#[test]
+fn epoch_mtimes_survive_tar_conversions_exactly() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let tree = tmp.join("e");
+    fs_err::create_dir_all(&tree)?;
+    fs_err::write(tree.join("epoch.txt"), "x")?;
+    let t = filetime::FileTime::from_unix_time(0, 0);
+    filetime::set_file_times(tree.join("epoch.txt").as_std_path(), t, t)?;
+
+    let src = tmp.join("src.tar");
+    run(&["compress", tree.as_str(), "-o", src.as_str()])?;
+    let out = tmp.join("out.tar.gz");
+    run(&["convert", src.as_str(), "-o", out.as_str()])?;
+
+    let entries = tar_entries(&out)?;
+    let (_, _, mtime) = find(&entries, "epoch.txt")?;
+    assert_eq!(*mtime, 0, "epoch mtime must survive conversion exactly");
+    Ok(())
+}
