@@ -645,7 +645,8 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
     let mut entries = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let entry = archive.by_index_raw(i)?;
-        entries.push(Entry {
+        let read_target = entry.is_symlink() && !entry.encrypted();
+        let mut listed = Entry {
             path: Utf8PathBuf::from(entry.name()),
             size: entry.size(),
             mtime: entry
@@ -654,7 +655,21 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
                 .unwrap_or(0),
             mode: entry.unix_mode().unwrap_or(0),
             is_dir: entry.is_dir(),
-        });
+            link_target: None,
+        };
+        drop(entry);
+        // Symlink targets are the entry content; they're tiny, and dry-run
+        // needs them for the same traversal check extraction applies.
+        if read_target {
+            use std::io::Read as _;
+            let mut target = Vec::new();
+            archive
+                .by_index(i)?
+                .take(MAX_SYMLINK_TARGET)
+                .read_to_end(&mut target)?;
+            listed.link_target = Some(String::from_utf8_lossy(&target).into_owned());
+        }
+        entries.push(listed);
     }
     Ok(entries)
 }

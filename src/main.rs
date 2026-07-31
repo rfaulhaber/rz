@@ -639,6 +639,25 @@ fn run(cli: Cli) -> Result<()> {
                 };
                 let mut stdout = std::io::stdout().lock();
                 for entry in &entries {
+                    // The real run rejects hostile shapes before any
+                    // filtering — raw-name traversal and absolute/`..` link
+                    // targets — so the preview must fail identically instead
+                    // of predicting paths.  (7z link targets live in the
+                    // solid stream and stay extraction-time-only.)
+                    filter::safe_entry_path(entry.path.as_str())?;
+                    if let Some(target) = &entry.link_target {
+                        let target_path = camino::Utf8Path::new(target);
+                        if target_path.is_absolute()
+                            || target_path
+                                .components()
+                                .any(|c| matches!(c, camino::Utf8Component::ParentDir))
+                        {
+                            return Err(Error::PathTraversal(format!(
+                                "{} -> {target}",
+                                entry.path
+                            )));
+                        }
+                    }
                     if !filter::should_extract(
                         entry.path.as_str(),
                         &dry_opts.includes,
@@ -653,6 +672,17 @@ fn run(cli: Cli) -> Result<()> {
                         continue;
                     }
                     if let Some(dest) = filter::resolve_entry_path(&entry.path, &dry_opts)? {
+                        // --one-top-level's whole effect is the derived
+                        // destination directory; show it, or the preview is
+                        // indistinguishable from a run without the flag.
+                        let dest = if one_top_level {
+                            match &output {
+                                Some(dir) => dir.join(&dest),
+                                None => dest,
+                            }
+                        } else {
+                            dest
+                        };
                         let _ = writeln!(
                             stdout,
                             "{}",

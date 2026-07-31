@@ -28,6 +28,13 @@ pub struct Entry {
     pub mtime: u64,
     pub mode: u32,
     pub is_dir: bool,
+    /// Symlink/hardlink target, where the format exposes it without reading
+    /// entry data blocks: tar always, zip for unencrypted symlink entries,
+    /// 7z never (targets live inside the solid stream).  Lossy-decoded —
+    /// used for display and for dry-run's structural traversal check, never
+    /// for extraction itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_target: Option<String>,
 }
 
 /// Summary metadata for an archive.

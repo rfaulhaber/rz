@@ -265,3 +265,86 @@ fn compress_dry_run_rejects_what_the_real_run_rejects() -> TestResult {
     assert!(String::from_utf8_lossy(&bare.stdout).contains("a.txt"));
     Ok(())
 }
+
+/// Archives the real run refuses up front — hostile link targets, raw-name
+/// traversal — must fail the preview identically, not print predictions.
+#[test]
+fn dry_run_rejects_hostile_tar_link_targets_like_the_real_run() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut h = tar::Header::new_gnu();
+    h.set_entry_type(tar::EntryType::Symlink);
+    h.set_size(0);
+    h.set_mode(0o777);
+    h.set_mtime(0);
+    h.set_link_name("../../etc/passwd")?;
+    builder.append_data(&mut h, "link", std::io::empty())?;
+    let mut ok = tar::Header::new_gnu();
+    ok.set_size(1);
+    ok.set_mode(0o644);
+    ok.set_mtime(0);
+    builder.append_data(&mut ok, "ok.txt", b"x".as_slice())?;
+    let archive = tmp.join("evil.tar");
+    fs_err::write(&archive, builder.into_inner()?)?;
+
+    let dry = Command::new(rz_bin())
+        .args(["decompress", archive.as_str(), "-n"])
+        .output()?;
+    let real = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["decompress", archive.as_str(), "-o", "out"])
+        .output()?;
+    assert_eq!(dry.status.code(), Some(1), "preview must reject the hostile link");
+    assert!(!real.status.success());
+    assert_eq!(dry.stderr, real.stderr, "identical rejection expected");
+    Ok(())
+}
+
+#[test]
+fn dry_run_rejects_hostile_zip_symlinks_like_the_real_run() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let archive = tmp.join("evil.zip");
+    let file = fs_err::File::create(&archive)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    zip.add_symlink("badlink", "../../etc/passwd", options)?;
+    zip.start_file("ok.txt", options)?;
+    use std::io::Write as _;
+    zip.write_all(b"x")?;
+    zip.finish()?;
+
+    let dry = Command::new(rz_bin())
+        .args(["decompress", archive.as_str(), "-n"])
+        .output()?;
+    let real = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["decompress", archive.as_str(), "-o", "out"])
+        .output()?;
+    assert_eq!(dry.status.code(), Some(1), "preview must reject the hostile link");
+    assert!(!real.status.success());
+    assert_eq!(dry.stderr, real.stderr, "identical rejection expected");
+    Ok(())
+}
+
+/// `--one-top-level`'s only effect is the derived destination directory, so
+/// the preview must show it.
+#[test]
+fn dry_run_shows_one_top_level_directory() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let archive = simple_tar(&tmp)?;
+
+    let dry = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["decompress", archive.as_str(), "-n", "-t"])
+        .output()?;
+    assert!(dry.status.success());
+    let stdout = String::from_utf8_lossy(&dry.stdout);
+    assert!(!stdout.trim().is_empty());
+    for line in stdout.lines() {
+        assert!(
+            line == "p" || line.starts_with("p/"),
+            "prediction missing the derived top-level dir: {line}",
+        );
+    }
+    Ok(())
+}

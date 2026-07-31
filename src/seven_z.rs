@@ -537,6 +537,10 @@ pub fn list(input: &Utf8Path) -> Result<Vec<Entry>> {
             // zip module reports from its external attributes.
             mode: entry_unix_mode(file).unwrap_or(0),
             is_dir: file.is_directory,
+            // A 7z symlink's target is its entry content inside the solid
+            // stream; listing must not decode data blocks, so it stays
+            // unknown here and gets validated at extraction time instead.
+            link_target: None,
         });
     }
     Ok(entries)

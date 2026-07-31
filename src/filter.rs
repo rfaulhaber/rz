@@ -791,16 +791,23 @@ pub fn list_tar_entries<R: std::io::Read>(
     let mut entries = Vec::new();
     for entry in archive.entries()? {
         let entry = entry?;
-        let header = entry.header();
         let path = entry.path()?;
         let path = Utf8PathBuf::try_from(path.into_owned())
             .map_err(|e| Error::InvalidUtf8Path(e.into_path_buf().display().to_string()))?;
+        let link_target = match entry.header().entry_type() {
+            tar::EntryType::Symlink | tar::EntryType::Link => entry
+                .link_name()?
+                .map(|t| t.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let header = entry.header();
         entries.push(crate::Entry {
             path,
             size: header.size()?,
             mtime: header.mtime()?,
             mode: header.mode()?,
             is_dir: header.entry_type().is_dir(),
+            link_target,
         });
     }
     Ok(entries)
