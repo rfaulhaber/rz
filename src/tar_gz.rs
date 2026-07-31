@@ -20,11 +20,24 @@ use crate::{ArchiveInfo, CompressOpts, DecompressOpts, Entry};
 /// throughput gains at the cost of higher memory use.
 const PARALLEL_BLOCK_SIZE: usize = 1024 * 1024;
 
+/// flate2's `Compression::new` asserts `level <= 9` — a bare `--level 10`
+/// must come back as an error, not a panic and a stub archive.  Level 0 is
+/// valid gzip (store).
+pub(crate) fn validate_level(level: u32) -> Result<u32> {
+    if level > 9 {
+        return Err(std::io::Error::other(format!(
+            "gzip compression level must be 0..=9 (got {level})"
+        ))
+        .into());
+    }
+    Ok(level)
+}
+
 // ── Compress ──────────────────────────────────────────────────────────────────
 
 pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'_>) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
-    let level = opts.level.unwrap_or(6);
+    let level = validate_level(opts.level.unwrap_or(6))?;
 
     // Buffer the tar archive in memory, then gzip-compress in parallel blocks.
     let mut tar_data = Vec::new();
@@ -52,7 +65,7 @@ pub fn compress_to_writer<W: std::io::Write>(
     opts: &CompressOpts<'_>,
 ) -> Result<()> {
     let inputs = filter::validate_inputs(inputs, opts)?;
-    let level = opts.level.unwrap_or(6);
+    let level = validate_level(opts.level.unwrap_or(6))?;
 
     let mut tar_data = Vec::new();
     {

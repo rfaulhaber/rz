@@ -470,7 +470,10 @@ fn tar_compressed_writer(
     level: Option<u32>,
 ) -> Result<Box<dyn EncoderHandle>> {
     match fmt {
-        Format::TarGz => Ok(Box::new(GzHandle::new(writer, level.unwrap_or(6)))),
+        Format::TarGz => Ok(Box::new(GzHandle::new(
+            writer,
+            crate::tar_gz::validate_level(level.unwrap_or(6))?,
+        ))),
         Format::TarZst => Ok(Box::new(ZstHandle::new(writer, level)?)),
         Format::TarXz => xz_writer(writer, level.unwrap_or(6)),
         #[cfg(feature = "bzip2")]
