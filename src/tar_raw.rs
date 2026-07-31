@@ -15,7 +15,6 @@
 //! either copied through verbatim or skipped whole; either way the physical
 //! layout — sparse maps included — is untouched.
 
-use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use crate::error::{Error, Result};
@@ -29,6 +28,11 @@ pub struct RawEntry {
     pub name: String,
     /// Modification time in unix seconds (pax `mtime` record wins).
     pub mtime: u64,
+    /// For hard-link entries (typeflag `1`), the name of the entry linked to:
+    /// GNU `K` payload, else pax `linkpath` record, else the header linkname
+    /// field.  Update planning needs it — dropping a link's target entry
+    /// reorders the target *after* the link, which no extractor can resolve.
+    pub hardlink_target: Option<String>,
 }
 
 /// Outcome of scanning a whole archive.
@@ -72,6 +76,13 @@ impl Header {
 
     fn mtime(&self) -> u64 {
         parse_numeric(&self.block[136..148]).unwrap_or(0)
+    }
+
+    /// Linkname from the fixed header field.  Lossy: link targets are
+    /// arbitrary bytes, and a mismatched byte only affects name matching in
+    /// the update planner — never the copied bytes themselves.
+    fn short_link(&self) -> String {
+        String::from_utf8_lossy(trimmed(&self.block[157..257])).into_owned()
     }
 
     /// GNU sparse: does the base header announce extended sparse blocks?
@@ -169,6 +180,7 @@ struct PaxOverrides {
     path: Option<String>,
     size: Option<u64>,
     mtime: Option<u64>,
+    linkpath: Option<String>,
 }
 
 fn parse_pax_records(payload: &[u8]) -> Result<PaxOverrides> {
@@ -210,6 +222,9 @@ fn parse_pax_records(payload: &[u8]) -> Result<PaxOverrides> {
                     .ok()
                     .and_then(|s| s.split('.').next()?.parse().ok());
             }
+            b"linkpath" => {
+                out.linkpath = Some(String::from_utf8_lossy(value).into_owned());
+            }
             _ => {}
         }
     }
@@ -237,6 +252,7 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
     // Meta headers (with payloads) buffered for the current group.
     let mut pending: Vec<Vec<u8>> = Vec::new();
     let mut long_name: Option<Vec<u8>> = None;
+    let mut long_link: Option<Vec<u8>> = None;
     let mut pax: Option<PaxOverrides> = None;
     // body_end trails `pos`, marking the end of the last *complete* group so
     // a truncated trailing group is not counted.
@@ -270,12 +286,14 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
                 let mut payload = vec![0u8; padded as usize];
                 read_block(reader, &mut payload)?;
                 pos += padded;
+                let mut value = payload[..header.size as usize].to_vec();
+                while value.last() == Some(&0) {
+                    value.pop();
+                }
                 if header.typeflag == b'L' {
-                    let mut name = payload[..header.size as usize].to_vec();
-                    while name.last() == Some(&0) {
-                        name.pop();
-                    }
-                    long_name = Some(name);
+                    long_name = Some(value);
+                } else {
+                    long_link = Some(value);
                 }
                 let mut group_part = header.block.to_vec();
                 group_part.extend_from_slice(&payload);
@@ -324,6 +342,7 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
                 }
 
                 let pax_now = pax.take().unwrap_or_default();
+                let long_link_now = long_link.take();
                 let name = match long_name.take() {
                     Some(bytes) => String::from_utf8(bytes).map_err(|e| {
                         Error::InvalidUtf8Path(String::from_utf8_lossy(e.as_bytes()).into_owned())
@@ -333,6 +352,12 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
                         None => header.short_name()?,
                     },
                 };
+                let hardlink_target = (header.typeflag == b'1').then(|| {
+                    match long_link_now {
+                        Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                        None => pax_now.linkpath.unwrap_or_else(|| header.short_link()),
+                    }
+                });
                 // Physical payload length.  For GNU sparse entries the size
                 // field already holds the stored (compacted) byte count —
                 // the logical size lives in `realsize`, which we never need.
@@ -342,6 +367,7 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
                 entries.push(RawEntry {
                     name: name.clone(),
                     mtime,
+                    hardlink_target,
                 });
 
                 match &mut sink {
@@ -399,17 +425,6 @@ pub fn copy_entries<R: Read + ?Sized, W: Write>(
 ) -> Result<()> {
     process(reader, Sink::Copy { writer, keep })?;
     Ok(())
-}
-
-/// Build the `name → mtime` index update mode gates on, with the same
-/// trailing-slash normalization `modify.rs` applies to walk names.
-pub fn index_entries<R: Read + ?Sized>(reader: &mut R) -> Result<HashMap<String, u64>> {
-    let scan = scan(reader)?;
-    Ok(scan
-        .entries
-        .into_iter()
-        .map(|e| (e.name.trim_end_matches('/').to_owned(), e.mtime))
-        .collect())
 }
 
 #[cfg(test)]

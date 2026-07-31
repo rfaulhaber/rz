@@ -134,6 +134,90 @@ fn update_without_changes_is_a_no_op() -> TestResult {
     Ok(())
 }
 
+/// `update <archive> .` walks names spelled `./f.txt` while tar stores
+/// `f.txt`; the gate and keep-plan must compare written names or every
+/// update re-appends the whole tree.
+#[test]
+fn update_from_dot_input_does_not_duplicate() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let src = tmp.join("src");
+    fs_err::create_dir_all(src.join("sub"))?;
+    fs_err::write(src.join("a.txt"), "v1")?;
+    fs_err::write(src.join("sub/b.txt"), "b")?;
+    for p in [&src.join("a.txt"), &src.join("sub/b.txt"), &src.join("sub"), &src] {
+        set_mtime(p, 1_000_000_000)?;
+    }
+
+    run(&src, &["compress", ".", "-o", "../a.tar.gz"])?;
+    let baseline: usize = name_counts(&tmp, "a.tar.gz")?.values().sum();
+
+    run(&src, &["update", "../a.tar.gz", "."])?;
+    run(&src, &["update", "../a.tar.gz", "."])?;
+    let after_noop: usize = name_counts(&tmp, "a.tar.gz")?.values().sum();
+    assert_eq!(after_noop, baseline, "no-op updates from `.` must not grow the archive");
+
+    fs_err::write(src.join("a.txt"), "v2")?;
+    set_mtime(&src.join("a.txt"), 1_100_000_000)?;
+    run(&src, &["update", "../a.tar.gz", "."])?;
+    let counts = name_counts(&tmp, "a.tar.gz")?;
+    assert_eq!(counts.values().sum::<usize>(), baseline, "counts: {counts:?}");
+    assert_eq!(counts.get("a.txt"), Some(&1), "counts: {counts:?}");
+
+    let out_dir = tmp.join("out");
+    run(&tmp, &["decompress", "a.tar.gz", "-o", out_dir.as_str()])?;
+    assert_eq!(fs_err::read_to_string(out_dir.join("a.txt"))?, "v2");
+    Ok(())
+}
+
+/// Dropping a superseded entry that a kept hard link points at would move the
+/// target *after* the link, which no extractor can resolve.  The plan must
+/// keep the stale copy; the appended version still wins by coming last.
+#[test]
+fn update_keeps_hardlink_target_extractable() -> TestResult {
+    use std::io::Write as _;
+
+    let (_guard, tmp) = temp_dir()?;
+
+    // f (regular, "old"), link (hardlink -> h/f): the shape GNU tar produces
+    // for two hardlinked files.  Built by hand so the entry order is fixed.
+    let mut builder = tar::Builder::new(Vec::new());
+    let body = b"old";
+    let mut h = tar::Header::new_gnu();
+    h.set_size(body.len() as u64);
+    h.set_mode(0o644);
+    h.set_mtime(1_000_000_000);
+    builder.append_data(&mut h, "h/f", body.as_slice())?;
+    let mut l = tar::Header::new_gnu();
+    l.set_entry_type(tar::EntryType::Link);
+    l.set_size(0);
+    l.set_mode(0o644);
+    l.set_mtime(1_000_000_000);
+    l.set_link_name("h/f")?;
+    builder.append_data(&mut l, "h/link", std::io::empty())?;
+    let tar_bytes = builder.into_inner()?;
+
+    let archive = tmp.join("h.tar.gz");
+    let mut enc =
+        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&tar_bytes)?;
+    fs_err::write(&archive, enc.finish()?)?;
+
+    // On disk: only a newer f, so the update supersedes the link's target.
+    let src = tmp.join("h");
+    fs_err::create_dir_all(&src)?;
+    fs_err::write(src.join("f"), "new")?;
+    set_mtime(&src.join("f"), 1_100_000_000)?;
+    set_mtime(&src, 1_000_000_000)?;
+    run(&tmp, &["update", "h.tar.gz", "h"])?;
+
+    let out_dir = tmp.join("out");
+    run(&tmp, &["decompress", "h.tar.gz", "-o", out_dir.as_str()])?;
+    assert_eq!(fs_err::read_to_string(out_dir.join("h/f"))?, "new");
+    // The link was created from the pre-update copy — same as GNU tar.
+    assert_eq!(fs_err::read_to_string(out_dir.join("h/link"))?, "old");
+    Ok(())
+}
+
 #[test]
 fn update_still_adds_genuinely_new_files() -> TestResult {
     let (_guard, tmp) = temp_dir()?;

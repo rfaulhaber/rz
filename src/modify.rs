@@ -139,7 +139,7 @@ fn tar_append(
         let idx = (mode == AppendMode::Update).then(|| {
             scan.entries
                 .iter()
-                .map(|e| (e.name.trim_end_matches('/').to_owned(), e.mtime))
+                .map(|e| (written_name(&e.name), e.mtime))
                 .collect::<HashMap<String, u64>>()
         });
         (idx, scan.body_end)
@@ -270,8 +270,7 @@ fn append_inputs_with_index<W: Write>(
             // the per-name index lookup at file granularity.
             walk_and_append_with_index(builder, input, name, opts, idx)?;
         } else {
-            let fs_mtime = mtime_secs(&meta);
-            if !is_newer_than_archive(name, fs_mtime, idx) {
+            if !update_wants(name, &meta, idx) {
                 continue;
             }
             append_one_file(builder, input, name, opts)?;
@@ -280,6 +279,26 @@ fn append_inputs_with_index<W: Write>(
         }
     }
     Ok(())
+}
+
+/// The name tar actually stores for a walked path: `tar::Header::set_path`
+/// drops `.` components (and redundant separators) at encoding time, so
+/// `update <archive> .` walks names like `./f.txt` while the archive holds
+/// `f.txt`.  Every index key, gate lookup, and keep decision goes through
+/// this so all three agree on the written spelling; a bare `.` (the root
+/// entry of an archive built from `.`) is kept, matching what the builder
+/// emits for it.  Trailing-slash normalization falls out for free: a
+/// trailing `/` is an empty component.
+fn written_name(name: &str) -> String {
+    let parts: Vec<&str> = name
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect();
+    if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    }
 }
 
 /// Decide whether an update-walk entry gets (re)written: strictly newer on
@@ -292,7 +311,7 @@ fn append_inputs_with_index<W: Write>(
 /// unconditional re-emission used to duplicate every directory on every
 /// update.
 fn update_wants(name: &str, meta: &std::fs::Metadata, idx: &HashMap<String, u64>) -> bool {
-    is_newer_than_archive(name.trim_end_matches('/'), mtime_secs(meta), idx)
+    is_newer_than_archive(&written_name(name), mtime_secs(meta), idx)
 }
 
 fn walk_and_append_with_index<W: Write>(
@@ -345,19 +364,19 @@ fn plan_update_names(
         if meta.is_dir() {
             if opts.no_recursion {
                 if update_wants(name, &meta, idx) {
-                    planned.insert(name.trim_end_matches('/').to_owned());
+                    planned.insert(written_name(name));
                 }
                 continue;
             }
             filter::walk_dir(input, name, opts, &mut |entry| {
                 let entry_meta = filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
                 if update_wants(&entry.archive_name, &entry_meta, idx) {
-                    planned.insert(entry.archive_name.trim_end_matches('/').to_owned());
+                    planned.insert(written_name(&entry.archive_name));
                 }
                 Ok(())
             })?;
         } else if update_wants(name, &meta, idx) {
-            planned.insert(name.to_owned());
+            planned.insert(written_name(name));
         }
     }
     Ok(planned)
@@ -812,8 +831,34 @@ fn tar_compressed_append_into(
     // decompression pass is the price of a correct plan.
     let (archive_idx, superseded) = if mode == AppendMode::Update {
         let mut reader = open_tar_reader(archive, fmt)?;
-        let idx = crate::tar_raw::index_entries(&mut reader)?;
-        let planned = plan_update_names(inputs, opts, &idx)?;
+        let scan = crate::tar_raw::scan(&mut reader)?;
+        let idx: HashMap<String, u64> = scan
+            .entries
+            .iter()
+            .map(|e| (written_name(&e.name), e.mtime))
+            .collect();
+        let mut planned = plan_update_names(inputs, opts, &idx)?;
+        // Rescue any planned drop that a *kept* hard-link entry still points
+        // at: the re-appended copy lands after the link, and extractors
+        // resolve hard links against what is already on disk, so the link
+        // would dangle.  Keeping the stale copy mirrors what plain `append`
+        // always did — the appended version still wins by coming last.
+        // Fixpoint: rescuing a link entry re-activates its own target.
+        loop {
+            let rescued: Vec<String> = scan
+                .entries
+                .iter()
+                .filter(|e| !planned.contains(&written_name(&e.name)))
+                .filter_map(|e| e.hardlink_target.as_deref().map(written_name))
+                .filter(|target| planned.contains(target))
+                .collect();
+            if rescued.is_empty() {
+                break;
+            }
+            for target in rescued {
+                planned.remove(&target);
+            }
+        }
         (Some(idx), planned)
     } else {
         (None, HashSet::new())
@@ -824,7 +869,7 @@ fn tar_compressed_append_into(
     let mut handle = tar_compressed_writer(fmt, out_buf, level)?;
 
     let mut reader = open_tar_reader(archive, fmt)?;
-    let mut keep = |name: &str| !superseded.contains(name.trim_end_matches('/'));
+    let mut keep = |name: &str| !superseded.contains(&written_name(name));
     handle.copy_existing(&mut reader, &mut keep)?;
 
     handle.append_inputs(inputs, opts, archive_idx.as_ref())?;
