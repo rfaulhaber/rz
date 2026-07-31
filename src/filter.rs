@@ -385,6 +385,51 @@ pub fn input_metadata(path: &Utf8Path, follow_symlinks: bool) -> Result<std::fs:
     }
 }
 
+/// Archive-name base for a top-level input.
+///
+/// `file_name` covers normal paths, and dot-only spellings (`.`, `./`) keep
+/// their literal form — tar strips the dot components at encoding time and
+/// zip stores them verbatim, both long-standing behaviour.  Inputs ending in
+/// `..` resolve to the real directory's name instead: baking `..` into entry
+/// names produces archives every extractor — rz's own `safe_entry_path`
+/// included — rejects as traversal.
+pub fn input_base_name(input: &Utf8Path) -> Result<String> {
+    if let Some(name) = input.file_name() {
+        return Ok(name.to_owned());
+    }
+    if !input.as_str().split('/').any(|c| c == "..") {
+        return Ok(input.as_str().to_owned());
+    }
+    let canonical = input.canonicalize_utf8()?;
+    match canonical.file_name() {
+        Some(name) => Ok(name.to_owned()),
+        None => Err(Error::Io(std::io::Error::other(format!(
+            "cannot derive an entry name for `{input}`: it resolves to the filesystem root"
+        )))),
+    }
+}
+
+/// Warn-and-skip gate for filesystem objects zip and 7z cannot represent
+/// (FIFOs, sockets, device nodes).  Opening one for reading can block
+/// forever — a FIFO with no writer parks `open(2)` — so those walks skip
+/// them the way Info-ZIP and 7-Zip do.  tar is unaffected: it stores them
+/// as typed entries without reading any content.
+pub fn skip_unarchivable_special(meta: &std::fs::Metadata, name: &str) -> bool {
+    use std::io::Write;
+
+    let ft = meta.file_type();
+    if ft.is_file() || ft.is_dir() || ft.is_symlink() {
+        return false;
+    }
+    let mut stderr = std::io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "rz: warning: skipping `{}`: special files are not representable in this format",
+        crate::progress::escape_entry_name(name),
+    );
+    true
+}
+
 /// Stat a top-level input path without `fs_err`'s wrapping.
 ///
 /// `fs_err`'s default error message says "failed to query metadata of
@@ -719,19 +764,19 @@ pub fn append_inputs<W: std::io::Write>(
 ) -> Result<()> {
     for input in inputs {
         let meta = input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
+        let name = input_base_name(input)?;
+        if opts.excludes.is_match(&name) {
             continue;
         }
         if meta.is_dir() {
-            append_dir_filtered(builder, input, name, opts)?;
+            append_dir_filtered(builder, input, &name, opts)?;
         } else {
             if !passes_time_filter(fs_mtime_secs(&meta), opts.newer_than, opts.older_than) {
                 continue;
             }
             let size = meta.len();
-            append_file_entry(builder, input, name, opts)?;
-            opts.progress.set_entry(name);
+            append_file_entry(builder, input, &name, opts)?;
+            opts.progress.set_entry(&name);
             opts.progress.inc(size);
         }
     }
@@ -1240,15 +1285,15 @@ pub fn collect_compress_paths(
     let mut paths = Vec::new();
     for input in inputs {
         let meta = input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
+        let name = input_base_name(input)?;
+        if opts.excludes.is_match(&name) {
             continue;
         }
         if meta.is_dir() {
             if opts.no_recursion {
                 paths.push(format!("{name}/"));
             } else {
-                walk_dir(input, name, opts, &mut |entry| {
+                walk_dir(input, &name, opts, &mut |entry| {
                     if entry.is_dir {
                         paths.push(format!("{}/", entry.archive_name));
                     } else {
@@ -1266,7 +1311,7 @@ pub fn collect_compress_paths(
                 })?;
             }
         } else if passes_time_filter(fs_mtime_secs(&meta), opts.newer_than, opts.older_than) {
-            paths.push(name.to_owned());
+            paths.push(name);
         }
     }
     Ok(paths)

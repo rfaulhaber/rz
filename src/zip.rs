@@ -110,40 +110,40 @@ fn write_archive(
         let options = base_options.with_aes_encryption(AesMode::Aes256, pwd.as_str());
         for input in inputs {
             let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-            let name = input.file_name().unwrap_or(input.as_str());
+            let name = filter::input_base_name(input)?;
             if !opts.follow_symlinks && meta.file_type().is_symlink() {
-                write_symlink_entry(&mut zip, input, name, options, opts)?;
+                write_symlink_entry(&mut zip, input, &name, options, opts)?;
             } else if meta.is_dir() {
                 if opts.no_recursion {
                     zip.add_directory(format!("{name}/"), with_unix_mode(options, &meta))?;
                 } else {
-                    add_dir_walked(&mut zip, input, name, options, opts)?;
+                    add_dir_walked(&mut zip, input, &name, options, opts)?;
                 }
-            } else {
-                zip.start_file(name, with_unix_mode(options, &meta))?;
+            } else if !filter::skip_unarchivable_special(&meta, &name) {
+                zip.start_file(&name, with_unix_mode(options, &meta))?;
                 let mut f = fs_err::File::open(input)?;
                 let size = io::copy(&mut f, &mut zip)?;
-                opts.progress.set_entry(name);
+                opts.progress.set_entry(&name);
                 opts.progress.inc(size);
             }
         }
     } else {
         for input in inputs {
             let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-            let name = input.file_name().unwrap_or(input.as_str());
+            let name = filter::input_base_name(input)?;
             if !opts.follow_symlinks && meta.file_type().is_symlink() {
-                write_symlink_entry(&mut zip, input, name, base_options, opts)?;
+                write_symlink_entry(&mut zip, input, &name, base_options, opts)?;
             } else if meta.is_dir() {
                 if opts.no_recursion {
                     zip.add_directory(format!("{name}/"), with_unix_mode(base_options, &meta))?;
                 } else {
-                    add_dir_walked(&mut zip, input, name, base_options, opts)?;
+                    add_dir_walked(&mut zip, input, &name, base_options, opts)?;
                 }
-            } else {
-                zip.start_file(name, with_unix_mode(base_options, &meta))?;
+            } else if !filter::skip_unarchivable_special(&meta, &name) {
+                zip.start_file(&name, with_unix_mode(base_options, &meta))?;
                 let mut f = fs_err::File::open(input)?;
                 let size = io::copy(&mut f, &mut zip)?;
-                opts.progress.set_entry(name);
+                opts.progress.set_entry(&name);
                 opts.progress.inc(size);
             }
         }
@@ -177,6 +177,9 @@ fn add_dir_walked<'k>(
             } else {
                 link_meta
             };
+            if !entry.is_dir && filter::skip_unarchivable_special(&meta, &entry.archive_name) {
+                return Ok(());
+            }
             let entry_options = with_unix_mode(options, &meta);
             if entry.is_dir {
                 zip.add_directory(format!("{}/", entry.archive_name), entry_options)?;

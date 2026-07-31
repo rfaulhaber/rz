@@ -261,20 +261,20 @@ fn append_inputs_with_index<W: Write>(
     };
     for input in inputs {
         let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
+        let name = filter::input_base_name(input)?;
+        if opts.excludes.is_match(&name) {
             continue;
         }
         if meta.is_dir() {
             // For directories we walk children individually so we can apply
             // the per-name index lookup at file granularity.
-            walk_and_append_with_index(builder, input, name, opts, idx)?;
+            walk_and_append_with_index(builder, input, &name, opts, idx)?;
         } else {
-            if !update_wants(name, &meta, idx) {
+            if !update_wants(&name, &meta, idx) {
                 continue;
             }
-            append_one_file(builder, input, name, opts)?;
-            opts.progress.set_entry(name);
+            append_one_file(builder, input, &name, opts)?;
+            opts.progress.set_entry(&name);
             opts.progress.inc(meta.len());
         }
     }
@@ -357,26 +357,26 @@ fn plan_update_names(
     let mut planned = HashSet::new();
     for input in inputs {
         let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
+        let name = filter::input_base_name(input)?;
+        if opts.excludes.is_match(&name) {
             continue;
         }
         if meta.is_dir() {
             if opts.no_recursion {
-                if update_wants(name, &meta, idx) {
-                    planned.insert(written_name(name));
+                if update_wants(&name, &meta, idx) {
+                    planned.insert(written_name(&name));
                 }
                 continue;
             }
-            filter::walk_dir(input, name, opts, &mut |entry| {
+            filter::walk_dir(input, &name, opts, &mut |entry| {
                 let entry_meta = filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
                 if update_wants(&entry.archive_name, &entry_meta, idx) {
                     planned.insert(written_name(&entry.archive_name));
                 }
                 Ok(())
             })?;
-        } else if update_wants(name, &meta, idx) {
-            planned.insert(written_name(name));
+        } else if update_wants(&name, &meta, idx) {
+            planned.insert(written_name(&name));
         }
     }
     Ok(planned)
@@ -1060,18 +1060,16 @@ fn plan_zip_entries(
     let mut planned = Vec::new();
     for input in inputs {
         let meta = filter::input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
+        let name = filter::input_base_name(input)?;
+        if opts.excludes.is_match(&name) {
             continue;
         }
         if meta.is_dir() {
             if opts.no_recursion {
-                planned.push(PlannedZipEntry::Dir {
-                    name: name.to_owned(),
-                });
+                planned.push(PlannedZipEntry::Dir { name });
                 continue;
             }
-            filter::walk_dir(input, name, opts, &mut |entry| {
+            filter::walk_dir(input, &name, opts, &mut |entry| {
                 if entry.is_dir {
                     // Directory entries carry no data; unzippers materialise
                     // the leading path components of each file anyway, so the
@@ -1082,6 +1080,9 @@ fn plan_zip_entries(
                 if !should_add_zip_entry(&entry.archive_name, &meta, archive_idx) {
                     return Ok(());
                 }
+                if filter::skip_unarchivable_special(&meta, &entry.archive_name) {
+                    return Ok(());
+                }
                 planned.push(plan_zip_file(
                     entry.archive_name,
                     entry.fs_path,
@@ -1089,12 +1090,11 @@ fn plan_zip_entries(
                 )?);
                 Ok(())
             })?;
-        } else if should_add_zip_entry(name, &meta, archive_idx) {
-            planned.push(plan_zip_file(
-                name.to_owned(),
-                input.clone(),
-                opts.follow_symlinks,
-            )?);
+        } else if should_add_zip_entry(&name, &meta, archive_idx) {
+            if filter::skip_unarchivable_special(&meta, &name) {
+                continue;
+            }
+            planned.push(plan_zip_file(name, input.clone(), opts.follow_symlinks)?);
         }
     }
     Ok(planned)

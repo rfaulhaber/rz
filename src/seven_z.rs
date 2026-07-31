@@ -46,21 +46,21 @@ pub fn compress(inputs: &[Utf8PathBuf], output: &Utf8Path, opts: &CompressOpts<'
     // now match archive-relative names, also like tar and zip.
     for input in &inputs {
         let meta = crate::filter::input_metadata(input, opts.follow_symlinks)?;
-        let name = input.file_name().unwrap_or(input.as_str());
-        if opts.excludes.is_match(name) {
+        let name = crate::filter::input_base_name(input)?;
+        if opts.excludes.is_match(&name) {
             continue;
         }
         let link_meta = fs_err::symlink_metadata(input)?;
         if !opts.follow_symlinks && link_meta.file_type().is_symlink() {
-            push_symlink_entry(&mut writer, input, name, &link_meta, opts)?;
+            push_symlink_entry(&mut writer, input, &name, &link_meta, opts)?;
         } else if meta.is_dir() {
             if opts.no_recursion {
-                push_dir_entry(&mut writer, input, name, &meta)?;
+                push_dir_entry(&mut writer, input, &name, &meta)?;
             } else {
-                push_dir_walked(&mut writer, input, name, opts)?;
+                push_dir_walked(&mut writer, input, &name, opts)?;
             }
-        } else {
-            push_file_entry(&mut writer, input, name, &meta, opts)?;
+        } else if !crate::filter::skip_unarchivable_special(&meta, &name) {
+            push_file_entry(&mut writer, input, &name, &meta, opts)?;
         }
     }
     let file = writer.finish()?;
@@ -133,6 +133,9 @@ fn push_dir_walked(
             push_dir_entry(writer, &entry.fs_path, &entry.archive_name, &meta)
         } else {
             let meta = crate::filter::input_metadata(&entry.fs_path, opts.follow_symlinks)?;
+            if crate::filter::skip_unarchivable_special(&meta, &entry.archive_name) {
+                return Ok(());
+            }
             push_file_entry(writer, &entry.fs_path, &entry.archive_name, &meta, opts)
         }
     })
@@ -354,10 +357,13 @@ fn extract_entry(
     let mut out_file = fs_err::File::create(&out_path)?;
     let written = std::io::copy(reader, &mut out_file)?;
     restore_mtime(&out_file, entry);
+    // Only S_IFREG modes get chmod'd: an attribute word forged as exactly
+    // 0x8000 (unix marker, no type bits) decodes to mode 0, and applying it
+    // would leave the extracted file at 0o000.
     #[cfg(unix)]
     if opts.preserve_permissions
         && let Some(mode) = entry_unix_mode(entry)
-        && matches!(mode & 0xF000, 0o100000 | 0)
+        && mode & 0xF000 == 0o100000
     {
         use std::os::unix::fs::PermissionsExt;
         fs_err::set_permissions(&out_path, std::fs::Permissions::from_mode(mode & 0o7777))?;
