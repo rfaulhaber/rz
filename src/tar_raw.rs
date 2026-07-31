@@ -122,7 +122,12 @@ fn parse_numeric(field: &[u8]) -> Result<u64> {
         }
         return Ok(value);
     }
-    let text = trimmed(field);
+    // Historic producers pad octal fields with *leading* spaces; strip them
+    // so a modify path never refuses an archive the read paths accept.
+    let mut text = trimmed(field);
+    while let [b' ', rest @ ..] = text {
+        text = rest;
+    }
     if text.is_empty() {
         return Ok(0);
     }
@@ -162,9 +167,20 @@ fn verify_checksum(block: &[u8; BLOCK]) -> Result<()> {
     }
 }
 
-fn round_up(n: u64) -> u64 {
-    n.div_ceil(BLOCK as u64) * BLOCK as u64
+/// Round a payload size up to whole blocks.  Checked: a hostile base-256
+/// size near `u64::MAX` parses fine, and the unchecked multiply either
+/// panicked (debug) or wrapped the payload length to zero (release) —
+/// which would reinterpret entry data as headers.
+fn round_up(n: u64) -> Result<u64> {
+    n.div_ceil(BLOCK as u64)
+        .checked_mul(BLOCK as u64)
+        .ok_or_else(|| corrupt("entry size field overflows the archive"))
 }
+
+/// Upper bound for a meta header's payload (long names, pax records).  Real
+/// ones are at most a few KiB; the size field is attacker-controlled and
+/// used to allocate, so an absurd value must be an error, not an OOM abort.
+const MAX_META_PAYLOAD: u64 = 16 * 1024 * 1024;
 
 /// Fill `buf` from `reader`, erroring on a short read.
 fn read_block<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> Result<()> {
@@ -181,6 +197,12 @@ struct PaxOverrides {
     size: Option<u64>,
     mtime: Option<u64>,
     linkpath: Option<String>,
+    /// GNU pax sparse (0.x/1.0): the entry's *real* name.  The ustar header
+    /// (and any `path` record for long names) carries the mangled
+    /// `GNUSparseFile.<pid>/<name>` spelling, so this must win — matching on
+    /// the mangled name made `update` re-append forever without ever
+    /// superseding the stale copy.
+    sparse_name: Option<String>,
 }
 
 fn parse_pax_records(payload: &[u8]) -> Result<PaxOverrides> {
@@ -224,6 +246,9 @@ fn parse_pax_records(payload: &[u8]) -> Result<PaxOverrides> {
             }
             b"linkpath" => {
                 out.linkpath = Some(String::from_utf8_lossy(value).into_owned());
+            }
+            b"GNU.sparse.name" => {
+                out.sparse_name = Some(String::from_utf8_lossy(value).into_owned());
             }
             _ => {}
         }
@@ -282,7 +307,10 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
         match header.typeflag {
             // GNU long name / long link: payload names the next real entry.
             b'L' | b'K' => {
-                let padded = round_up(header.size);
+                if header.size > MAX_META_PAYLOAD {
+                    return Err(corrupt("long-name header declares an absurd size"));
+                }
+                let padded = round_up(header.size)?;
                 let mut payload = vec![0u8; padded as usize];
                 read_block(reader, &mut payload)?;
                 pos += padded;
@@ -301,7 +329,10 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
             }
             // Pax extended header for the next entry.
             b'x' => {
-                let padded = round_up(header.size);
+                if header.size > MAX_META_PAYLOAD {
+                    return Err(corrupt("pax header declares an absurd size"));
+                }
+                let padded = round_up(header.size)?;
                 let mut payload = vec![0u8; padded as usize];
                 read_block(reader, &mut payload)?;
                 pos += padded;
@@ -313,7 +344,10 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
             // Pax global header: applies to everything after it, so it is
             // always carried through, independent of keep decisions.
             b'g' => {
-                let padded = round_up(header.size);
+                if header.size > MAX_META_PAYLOAD {
+                    return Err(corrupt("pax global header declares an absurd size"));
+                }
+                let padded = round_up(header.size)?;
                 let mut payload = vec![0u8; padded as usize];
                 read_block(reader, &mut payload)?;
                 pos += padded;
@@ -343,13 +377,22 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
 
                 let pax_now = pax.take().unwrap_or_default();
                 let long_link_now = long_link.take();
-                let name = match long_name.take() {
-                    Some(bytes) => String::from_utf8(bytes).map_err(|e| {
-                        Error::InvalidUtf8Path(String::from_utf8_lossy(e.as_bytes()).into_owned())
-                    })?,
-                    None => match pax_now.path {
-                        Some(p) => p,
-                        None => header.short_name()?,
+                let long_name_now = long_name.take();
+                // `GNU.sparse.name` outranks everything: for pax sparse
+                // entries both the header field and any `path` record hold
+                // the mangled `GNUSparseFile.<pid>/` spelling.
+                let name = match pax_now.sparse_name {
+                    Some(n) => n,
+                    None => match long_name_now {
+                        Some(bytes) => String::from_utf8(bytes).map_err(|e| {
+                            Error::InvalidUtf8Path(
+                                String::from_utf8_lossy(e.as_bytes()).into_owned(),
+                            )
+                        })?,
+                        None => match pax_now.path {
+                            Some(p) => p,
+                            None => header.short_name()?,
+                        },
                     },
                 };
                 let hardlink_target = (header.typeflag == b'1').then(|| {
@@ -361,7 +404,7 @@ fn process<R: Read + ?Sized, W: Write>(reader: &mut R, mut sink: Sink<'_, W>) ->
                 // Physical payload length.  For GNU sparse entries the size
                 // field already holds the stored (compacted) byte count —
                 // the logical size lives in `realsize`, which we never need.
-                let data_len = round_up(pax_now.size.unwrap_or(header.size));
+                let data_len = round_up(pax_now.size.unwrap_or(header.size))?;
                 let mtime = pax_now.mtime.unwrap_or_else(|| header.mtime());
 
                 entries.push(RawEntry {
@@ -476,5 +519,74 @@ mod tests {
         let mut block = header_of("a.txt", 0, b'0');
         block[0] ^= 0xff;
         assert!(verify_checksum(&block).is_err());
+    }
+
+    #[test]
+    fn base256_size_near_u64_max_errors_instead_of_panicking() {
+        let mut h = tar::Header::new_gnu();
+        h.set_path("big").map_err(|_| ()).ok();
+        h.set_mtime(0);
+        h.set_mode(0o644);
+        // Base-256 u64::MAX: marker byte, three zeros, eight 0xFF.
+        let bytes = h.as_mut_bytes();
+        bytes[124] = 0x80;
+        for b in &mut bytes[125..128] {
+            *b = 0;
+        }
+        for b in &mut bytes[128..136] {
+            *b = 0xff;
+        }
+        h.set_cksum();
+        let mut archive = h.as_bytes().to_vec();
+        archive.extend_from_slice(&[0u8; 2 * BLOCK]);
+        assert!(scan(&mut archive.as_slice()).is_err());
+    }
+
+    #[test]
+    fn leading_space_padded_octal_fields_parse() -> Result<()> {
+        let mut h = tar::Header::new_gnu();
+        h.set_path("sp.txt").map_err(|_| ()).ok();
+        h.set_mtime(1_000_000);
+        h.set_mode(0o644);
+        h.as_mut_bytes()[124..136].copy_from_slice(b"          5 ");
+        h.set_cksum();
+        let mut archive = h.as_bytes().to_vec();
+        archive.extend_from_slice(b"hello");
+        archive.extend_from_slice(&[0u8; BLOCK - 5]);
+        archive.extend_from_slice(&[0u8; 2 * BLOCK]);
+
+        let scan = scan(&mut archive.as_slice())?;
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].name, "sp.txt");
+        assert_eq!(scan.body_end, 2 * BLOCK as u64);
+        Ok(())
+    }
+
+    #[test]
+    fn pax_sparse_name_wins_over_the_mangled_header_name() -> Result<()> {
+        // The shape bsdtar and `gnutar --sparse-version=1.0` emit: an `x`
+        // header whose GNU.sparse.name holds the real name, and a ustar
+        // header spelled GNUSparseFile.<pid>/<name>.
+        let records =
+            b"22 GNU.sparse.major=1\n22 GNU.sparse.minor=0\n28 GNU.sparse.name=real.bin\n";
+        let mut x = tar::Header::new_ustar();
+        x.set_entry_type(tar::EntryType::XHeader);
+        x.set_size(records.len() as u64);
+        x.set_mode(0o644);
+        x.set_mtime(0);
+        x.set_path("paxheader").map_err(|_| ()).ok();
+        x.set_cksum();
+        let mut archive = x.as_bytes().to_vec();
+        archive.extend_from_slice(records);
+        archive.resize(archive.len().next_multiple_of(BLOCK), 0);
+        archive.extend_from_slice(&header_of("GNUSparseFile.0/real.bin", 5, b'0'));
+        archive.extend_from_slice(b"MAP\0\0");
+        archive.resize(archive.len().next_multiple_of(BLOCK), 0);
+        archive.extend_from_slice(&[0u8; 2 * BLOCK]);
+
+        let scan = scan(&mut archive.as_slice())?;
+        assert_eq!(scan.entries.len(), 1);
+        assert_eq!(scan.entries[0].name, "real.bin");
+        Ok(())
     }
 }

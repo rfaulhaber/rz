@@ -155,6 +155,76 @@ fn pax_records_survive_and_keep_matches_pax_path() -> TestResult {
     Ok(())
 }
 
+/// bsdtar's default output (and `gnutar --sparse-version=1.0`) stores sparse
+/// entries under a mangled `GNUSparseFile.<pid>/` header name with the real
+/// name in a `GNU.sparse.name` pax record.  Update must gate on the real
+/// name, or the stale copy is carried forever as a phantom duplicate.
+#[test]
+fn update_supersedes_pax_sparse_entries_by_their_real_name() -> TestResult {
+    use std::io::Write as _;
+
+    let (_guard, tmp) = temp_dir()?;
+
+    let records =
+        b"22 GNU.sparse.major=1\n22 GNU.sparse.minor=0\n27 GNU.sparse.name=big.bin\n";
+    let mut out: Vec<u8> = Vec::new();
+    let mut x = tar::Header::new_ustar();
+    x.set_entry_type(tar::EntryType::XHeader);
+    x.set_size(records.len() as u64);
+    x.set_mode(0o644);
+    x.set_mtime(1_000_000);
+    x.set_path("paxheader")?;
+    x.set_cksum();
+    out.extend_from_slice(x.as_bytes());
+    out.extend_from_slice(records);
+    out.resize(out.len().next_multiple_of(512), 0);
+
+    let payload = b"1\n0\n5\nHELLO";
+    let mut real = tar::Header::new_ustar();
+    real.set_size(payload.len() as u64);
+    real.set_mode(0o644);
+    real.set_mtime(1_000_000);
+    real.set_path("GNUSparseFile.0/big.bin")?;
+    real.set_cksum();
+    out.extend_from_slice(real.as_bytes());
+    out.extend_from_slice(payload);
+    out.resize(out.len().next_multiple_of(512), 0);
+
+    let plain = b"plain";
+    let mut p = tar::Header::new_ustar();
+    p.set_size(plain.len() as u64);
+    p.set_mode(0o644);
+    p.set_mtime(1_000_000);
+    p.set_path("plain.txt")?;
+    p.set_cksum();
+    out.extend_from_slice(p.as_bytes());
+    out.extend_from_slice(plain);
+    out.resize(out.len().next_multiple_of(512), 0);
+    out.extend_from_slice(&[0u8; 1024]);
+
+    let archive = tmp.join("sparse.tar.gz");
+    let mut enc =
+        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&out)?;
+    fs_err::write(&archive, enc.finish()?)?;
+
+    // A newer on-disk big.bin supersedes the sparse entry.
+    fs_err::write(tmp.join("big.bin"), "new content")?;
+    let t = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_times(tmp.join("big.bin").as_std_path(), t, t)?;
+    run(&tmp, &["update", "sparse.tar.gz", "big.bin"])?;
+
+    let listing = run(&tmp, &["list", "sparse.tar.gz"])?;
+    let stdout = String::from_utf8_lossy(&listing.stdout).into_owned();
+    assert!(
+        !stdout.contains("GNUSparseFile"),
+        "the stale sparse copy must be superseded, not carried: {stdout}",
+    );
+    assert!(stdout.lines().any(|l| l == "plain.txt"), "{stdout}");
+    assert!(stdout.lines().any(|l| l == "big.bin"), "{stdout}");
+    Ok(())
+}
+
 #[test]
 fn append_after_pax_and_long_name_entries_keeps_them_readable() -> TestResult {
     let (_guard, tmp) = temp_dir()?;
