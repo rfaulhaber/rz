@@ -387,12 +387,16 @@ pub fn decompress(input: &Utf8Path, output: &Utf8Path, opts: &DecompressOpts<'_>
     restore_dir_modes(dir_modes, output, opts)
 }
 
+/// Directory destinations paired with their archive mode word, collected
+/// during planning and applied after extraction.
+type DirModes = Vec<(Utf8PathBuf, u32)>;
+
 /// Apply recorded directory modes after extraction, children first, under
 /// `-P` — the deferral the tar and 7z paths already do.  Directory entries
 /// used to return from `extract_entry` before any permission handling, so a
 /// 0700 directory in a zip came out at the umask default.
 fn restore_dir_modes(
-    dir_modes: Vec<(Utf8PathBuf, u32)>,
+    dir_modes: DirModes,
     output: &Utf8Path,
     opts: &DecompressOpts<'_>,
 ) -> Result<()> {
@@ -403,7 +407,7 @@ fn restore_dir_modes(
     {
         use std::os::unix::fs::PermissionsExt;
         let mut dirs = dir_modes;
-        dirs.sort_by(|a, b| b.0.as_str().cmp(&a.0.as_str()));
+        dirs.sort_by(|a, b| b.0.as_str().cmp(a.0.as_str()));
         for (dest, mode) in dirs {
             let path = output.join(dest);
             // Skip anything that is no longer a real directory — chmod
@@ -466,11 +470,11 @@ fn has_ancestor_conflict(groups: &[DestGroup]) -> bool {
 fn plan_destinations(
     archive: &mut ZipArchive<fs_err::File>,
     opts: &DecompressOpts<'_>,
-) -> Result<(Vec<DestGroup>, Vec<(Utf8PathBuf, u32)>)> {
+) -> Result<(Vec<DestGroup>, DirModes)> {
     let mut groups: BTreeMap<Utf8PathBuf, (Vec<usize>, bool, bool)> = BTreeMap::new();
     // Directory modes for the post-extraction restore pass — the mode word
     // comes from the central directory, so collecting it here is free.
-    let mut dir_modes: Vec<(Utf8PathBuf, u32)> = Vec::new();
+    let mut dir_modes = DirModes::new();
     for index in 0..archive.len() {
         // Raw access: names and directory-ness come from the central directory,
         // so planning costs no decompression and needs no password.
