@@ -489,12 +489,24 @@ pub enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     Zip,
-    Tar,    // tar (no compression)
-    TarGz,  // tar + gzip
-    TarZst, // tar + zstd
-    TarXz,  // tar + xz
-    TarBz2, // tar + bzip2
-    SevenZ, // 7z
+    /// tar (no compression)
+    Tar,
+    /// tar + gzip
+    #[value(alias = "tar.gz", alias = "tgz")]
+    TarGz,
+    /// tar + zstd
+    #[value(alias = "tar.zst", alias = "tzst")]
+    TarZst,
+    /// tar + xz
+    #[value(alias = "tar.xz", alias = "txz")]
+    TarXz,
+    /// tar + bzip2
+    #[value(alias = "tar.bz2", alias = "tbz2")]
+    TarBz2,
+    /// 7z — the id every other 7z tool uses; "seven-z" (the derived
+    /// kebab-case name) stays as an alias for anything scripted against it
+    #[value(name = "7z", alias = "seven-z")]
+    SevenZ,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]

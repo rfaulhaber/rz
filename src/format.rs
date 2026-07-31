@@ -18,7 +18,7 @@ impl fmt::Display for Format {
             Self::TarZst => "tar-zst",
             Self::TarXz => "tar-xz",
             Self::TarBz2 => "tar-bz2",
-            Self::SevenZ => "seven-z",
+            Self::SevenZ => "7z",
         };
         f.write_str(s)
     }

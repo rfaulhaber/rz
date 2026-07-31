@@ -106,3 +106,46 @@ fn json_output_is_untouched_and_safe() -> TestResult {
     assert_eq!(path, Some(EVIL_NAME));
     Ok(())
 }
+
+/// Error messages embed entry names too (FileExists, PathTraversal, unpack
+/// errors); a hostile name must not put raw control bytes on stderr through
+/// that path either.
+#[test]
+fn error_messages_escape_control_bytes() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    let dir = tmp.join("esc");
+    fs_err::create_dir_all(&dir)?;
+    fs_err::write(dir.join("a\u{1b}[31mred"), "x")?;
+    for args in [
+        ["compress", "esc", "-o", "esc.tar"],
+        ["decompress", "esc.tar", "-o", "out"],
+    ] {
+        let out = Command::new(rz_bin())
+            .current_dir(tmp.as_std_path())
+            .args(args)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "rz {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    // Second extraction collides -> FileExists carries the entry name.
+    let out = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["decompress", "esc.tar", "-o", "out"])
+        .output()?;
+    assert!(!out.status.success());
+    assert!(
+        !out.stderr.contains(&0x1b),
+        "raw ESC reached stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("\\x1b"),
+        "escaped form missing: {:?}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    Ok(())
+}

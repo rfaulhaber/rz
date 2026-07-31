@@ -58,7 +58,7 @@ pub const TAR_GZ: FormatHarness = FormatHarness {
     list: rz_archive::tar_gz::list,
     info: rz_archive::tar_gz::info,
     ext: ".tar.gz",
-    format_name: "tar.gz",
+    format_name: "tar-gz",
     preserves_top_dir: true,
 };
 
@@ -68,7 +68,7 @@ pub const TAR_XZ: FormatHarness = FormatHarness {
     list: rz_archive::tar_xz::list,
     info: rz_archive::tar_xz::info,
     ext: ".tar.xz",
-    format_name: "tar.xz",
+    format_name: "tar-xz",
     preserves_top_dir: true,
 };
 
@@ -78,7 +78,7 @@ pub const TAR_ZST: FormatHarness = FormatHarness {
     list: rz_archive::tar_zst::list,
     info: rz_archive::tar_zst::info,
     ext: ".tar.zst",
-    format_name: "tar.zst",
+    format_name: "tar-zst",
     preserves_top_dir: true,
 };
 
@@ -89,7 +89,7 @@ pub const TAR_BZ2: FormatHarness = FormatHarness {
     list: rz_archive::tar_bz2::list,
     info: rz_archive::tar_bz2::info,
     ext: ".tar.bz2",
-    format_name: "tar.bz2",
+    format_name: "tar-bz2",
     preserves_top_dir: true,
 };
 

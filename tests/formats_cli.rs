@@ -52,6 +52,48 @@ fn formats_json_ids_and_extensions_match_the_parser() -> TestResult {
     Ok(())
 }
 
+/// `rz info` must report format ids `--format` accepts, so its output can be
+/// fed straight back into another rz invocation; `tar.gz`-style ids and the
+/// derived `seven-z` spelling both used to break that round-trip.
+#[test]
+fn info_format_ids_round_trip_into_format_flag() -> TestResult {
+    let guard = tempfile::tempdir()?;
+    let tmp = camino::Utf8PathBuf::try_from(guard.path().to_path_buf())
+        .map_err(|e| format!("non-UTF-8 tempdir: {e}"))?;
+    fs_err::write(tmp.join("a.txt"), "hello")?;
+
+    for archive in ["out.tar.gz", "out.7z", "out.zip"] {
+        let ok = Command::new(rz_bin())
+            .current_dir(tmp.as_std_path())
+            .args(["compress", "a.txt", "-o", archive])
+            .output()?;
+        assert!(ok.status.success());
+
+        let info = Command::new(rz_bin())
+            .current_dir(tmp.as_std_path())
+            .args(["info", archive, "--json"])
+            .output()?;
+        assert!(info.status.success());
+        let parsed: serde_json::Value = serde_json::from_slice(&info.stdout)?;
+        let id = parsed["format"].as_str().ok_or("no format field")?;
+
+        assert!(
+            Format::from_str(id, true).is_ok(),
+            "info reports `{id}`, which --format rejects",
+        );
+        let relist = Command::new(rz_bin())
+            .current_dir(tmp.as_std_path())
+            .args(["list", archive, "--format", id])
+            .output()?;
+        assert!(
+            relist.status.success(),
+            "list --format {id} failed: {}",
+            String::from_utf8_lossy(&relist.stderr),
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn formats_table_lists_every_variant() -> TestResult {
     let out = Command::new(rz_bin()).arg("formats").output()?;

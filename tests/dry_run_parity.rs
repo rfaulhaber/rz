@@ -235,3 +235,33 @@ fn dry_run_applies_the_mtime_window() -> TestResult {
     );
     Ok(())
 }
+
+/// `compress -n` must mirror the real run's format-level rejections: a
+/// preview that exits 0 for a command whose real run errors is a trap.
+#[test]
+fn compress_dry_run_rejects_what_the_real_run_rejects() -> TestResult {
+    let (_guard, tmp) = temp_dir()?;
+    fs_err::write(tmp.join("a.txt"), "x")?;
+
+    // Reproducibility flags are tar-only; zip must be rejected in preview
+    // exactly like in the real run.
+    let dry = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["compress", "-n", "a.txt", "--mtime", "0", "-o", "out.zip"])
+        .output()?;
+    let real = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["compress", "a.txt", "--mtime", "0", "-o", "out.zip"])
+        .output()?;
+    assert_eq!(dry.status.code(), Some(1), "preview must reject like the real run");
+    assert_eq!(dry.stderr, real.stderr, "identical rejection message expected");
+
+    // With no output and no format the walk preview still works.
+    let bare = Command::new(rz_bin())
+        .current_dir(tmp.as_std_path())
+        .args(["compress", "-n", "a.txt"])
+        .output()?;
+    assert!(bare.status.success());
+    assert!(String::from_utf8_lossy(&bare.stdout).contains("a.txt"));
+    Ok(())
+}

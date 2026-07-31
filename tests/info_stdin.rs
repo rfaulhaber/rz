@@ -93,8 +93,8 @@ fn info_from_stdin_autodetects_format() -> TestResult {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("tar.gz"),
-        "expected detected format tar.gz in output: {stdout}",
+        stdout.contains("tar-gz"),
+        "expected detected format tar-gz in output: {stdout}",
     );
     Ok(())
 }

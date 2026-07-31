@@ -81,6 +81,25 @@ fn compress_reports_disabled_feature() -> TestResult {
     Ok(())
 }
 
+/// The preview must fail the same way the real run would — `compress -n`
+/// used to return before format resolution and exit 0.
+#[test]
+fn compress_dry_run_reports_disabled_feature() -> TestResult {
+    let tmp = tempfile::tempdir()?;
+    let payload = tmp.path().join("x.txt");
+    fs_err::write(&payload, "hi")?;
+    let out_path = tmp.path().join("a.tar.bz2");
+    let out = Command::new(rz_bin())
+        .arg("compress")
+        .arg("-n")
+        .arg(&payload)
+        .arg("-o")
+        .arg(&out_path)
+        .output()?;
+    assert_reports_disabled(&out, "compress -n");
+    Ok(())
+}
+
 #[test]
 fn append_reports_disabled_feature() -> TestResult {
     let tmp = tempfile::tempdir()?;

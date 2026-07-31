@@ -73,7 +73,15 @@ fn main() -> ExitCode {
     }
     if let Err(e) = run(cli) {
         let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "rz: {e}");
+        // Error messages embed archive entry names (FileExists, PathTraversal,
+        // unpack I/O errors), which hostile archives can lace with terminal
+        // control bytes — escape the whole message, same as entry listings.
+        let msg = e.to_string();
+        let _ = writeln!(
+            stderr,
+            "rz: {}",
+            rz_archive::progress::escape_entry_name(&msg)
+        );
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -315,6 +323,27 @@ fn run(cli: Cli) -> Result<()> {
 
             // Dry-run: list what would be compressed and exit.
             if dry_run {
+                // Mirror the real run's format-level rejections so a preview
+                // never exits 0 for a command the real run refuses (disabled
+                // feature build, unsupported flag combinations).  A bare
+                // `compress -n <paths>` with no output or format still
+                // previews the walk — there the format is unknowable.
+                let to_stdout = output.as_ref().is_some_and(|o| is_stdio(o.as_str()));
+                let known_fmt = if to_stdout {
+                    format
+                } else {
+                    resolve_compress_format(format, output.as_deref()).ok()
+                };
+                if let Some(fmt) = known_fmt {
+                    rz_archive::format::ensure_format_enabled(&fmt)?;
+                    if to_stdout && requires_seek(&fmt) {
+                        return Err(Error::StdoutNotSupported(fmt.to_string()));
+                    }
+                    reject_reproducibility_for_non_tar(
+                        &fmt, mtime, owner, group, mode, newer_than, older_than,
+                    )?;
+                    reject_encryption_for_non_supported(&fmt, &password)?;
+                }
                 let dry_opts = CompressOpts {
                     level,
                     excludes,

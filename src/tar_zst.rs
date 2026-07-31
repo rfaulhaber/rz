@@ -189,7 +189,7 @@ pub fn info(input: &Utf8Path) -> Result<ArchiveInfo> {
     let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
 
     Ok(ArchiveInfo {
-        format: "tar.zst",
+        format: "tar-zst",
         entry_count,
         total_uncompressed,
         compressed_size,
@@ -209,7 +209,7 @@ pub fn info_from_reader<R: std::io::Read>(reader: R) -> Result<ArchiveInfo> {
     let (entry_count, total_uncompressed) = filter::count_tar_entries(&mut archive)?;
 
     Ok(ArchiveInfo {
-        format: "tar.zst",
+        format: "tar-zst",
         entry_count,
         total_uncompressed,
         compressed_size: counter.load(std::sync::atomic::Ordering::Relaxed),
