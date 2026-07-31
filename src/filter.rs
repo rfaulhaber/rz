@@ -139,7 +139,29 @@ pub fn resolve_entry_path(
 
     match apply_path_rewrites(flattened, &opts.renames, opts.prefix.as_deref())? {
         p if p.as_str().is_empty() => Ok(None),
-        p => Ok(Some(p)),
+        p => Ok(Some(normalize_rel_path(&p))),
+    }
+}
+
+/// Collapse a relative path to its normal components: `./sub/.//f` → `sub/f`.
+///
+/// Archive entries and rename rules both produce noisy spellings (`./a`,
+/// doubled separators from a rename that erased a component), and the noise
+/// is not just cosmetic — deferred-directory ordering sorts by path string,
+/// where `out/./a/b` and `out/a` disagree with the real hierarchy.  `..` and
+/// root components never survive to this point (`safe_entry_path` rejects
+/// them), so keeping only `Normal` components is lossless.  A path with no
+/// normal components (the `.` root entry of an archive built from `.`) maps
+/// to `.` — the output directory itself.
+fn normalize_rel_path(p: &Utf8Path) -> Utf8PathBuf {
+    let normalized: Utf8PathBuf = p
+        .components()
+        .filter(|c| matches!(c, camino::Utf8Component::Normal(_)))
+        .collect();
+    if normalized.as_str().is_empty() {
+        Utf8PathBuf::from(".")
+    } else {
+        normalized
     }
 }
 
@@ -835,6 +857,47 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
     archive.set_preserve_ownerships(opts.same_owner);
 
     let mut deferred_dirs: Vec<DeferredDir> = Vec::new();
+    let walked = unpack_tar_entries(archive, output, opts, &mut deferred_dirs);
+
+    // Children before parents (reverse path order), so a directory that ends
+    // up read-only is locked down only after everything inside it — and its
+    // mtime is set after its children stop bumping it.
+    //
+    // The flush runs even when the walk failed: whatever was extracted before
+    // the abort must still get its recorded modes, or a 0700 directory whose
+    // secrets already landed on disk would be left at create_dir_all's
+    // permissive default.  GNU tar flushes its delayed set_stat on failure
+    // the same way.  One failing directory doesn't abandon the rest; the
+    // walk's own error takes precedence over a flush error.
+    deferred_dirs.sort_by(|a, b| b.dest.as_str().cmp(a.dest.as_str()));
+    let mut flush_err: Option<Error> = None;
+    for dir in &deferred_dirs {
+        if let Err(e) = apply_deferred_dir(dir, opts)
+            && flush_err.is_none()
+        {
+            flush_err = Some(e);
+        }
+    }
+    walked?;
+    match flush_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+fn unpack_tar_entries<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    output: &Utf8Path,
+    opts: &DecompressOpts<'_>,
+    deferred_dirs: &mut Vec<DeferredDir>,
+) -> Result<()> {
+    // Destinations already written by *this* run.  A later entry with the
+    // same name replaces the earlier one silently — tar's last-wins rule —
+    // rather than tripping the overwrite ladder, which exists to protect
+    // files that predate the extraction.  Duplicate names are routine in
+    // appended-to archives (including rz's own `append`/`update` output).
+    let mut written: std::collections::HashSet<Utf8PathBuf> =
+        std::collections::HashSet::new();
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -890,7 +953,14 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             None => continue,
         };
 
-        let dest = output.join(&dest_path);
+        // The `.` root entry of an archive built from `.` is the output
+        // directory itself; joining it verbatim yields `out/.`, whose
+        // create_dir_all fails when `out` does not exist yet.
+        let dest = if dest_path.as_str() == "." {
+            output.to_owned()
+        } else {
+            output.join(&dest_path)
+        };
 
         // Ensure parent directories exist.
         if let Some(parent) = dest.parent()
@@ -900,7 +970,7 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
         }
 
         // Overwrite guard for non-directory entries.
-        if !is_dir && fs_err::symlink_metadata(&dest).is_ok() {
+        if !is_dir && !written.contains(&dest) && fs_err::symlink_metadata(&dest).is_ok() {
             if let Some(ref suffix) = opts.backup_suffix {
                 let backup = Utf8PathBuf::from(format!("{dest}{suffix}"));
                 fs_err::rename(&dest, &backup)?;
@@ -946,18 +1016,12 @@ pub fn unpack_tar_filtered<R: std::io::Read>(
             });
         } else if entry_type == tar::EntryType::Link {
             unpack_hard_link(&entry, output, &dest, opts)?;
+            written.insert(dest);
         } else {
             entry.unpack(&dest)?;
+            written.insert(dest);
         }
         opts.progress.inc(size);
-    }
-
-    // Children before parents (reverse path order), so a directory that ends
-    // up read-only is locked down only after everything inside it — and its
-    // mtime is set after its children stop bumping it.
-    deferred_dirs.sort_by(|a, b| b.dest.as_str().cmp(a.dest.as_str()));
-    for dir in &deferred_dirs {
-        apply_deferred_dir(dir, opts)?;
     }
     Ok(())
 }
@@ -978,6 +1042,14 @@ struct DeferredDir {
 /// restored best-effort.  Ordering matters: chown first, since it clears
 /// setuid/setgid bits that a `-P` chmod may then restore.
 fn apply_deferred_dir(dir: &DeferredDir, opts: &DecompressOpts<'_>) -> Result<()> {
+    // The path may no longer be the directory we created — a pre-existing
+    // symlink the create_dir_all silently followed, or a hostile swap while
+    // extraction ran.  chmod and utimes both follow symlinks, so applying
+    // through one would rewrite something outside the output tree.
+    match fs_err::symlink_metadata(&dir.dest) {
+        Ok(m) if m.file_type().is_dir() => {}
+        _ => return Ok(()),
+    }
     #[cfg(unix)]
     {
         if opts.same_owner
@@ -1092,7 +1164,13 @@ fn fs_mtime_secs(meta: &std::fs::Metadata) -> i64 {
 /// Returns `true` when the file at `path` has an mtime >= the given unix
 /// timestamp, meaning the existing file is at least as new as the entry.
 pub fn is_existing_newer(path: &Utf8Path, entry_mtime: u64) -> Result<bool> {
-    let meta = fs_err::metadata(path)?;
+    let meta = match fs_err::metadata(path) {
+        // The destination stat'd as present via symlink_metadata but is gone
+        // through the following stat: a dangling symlink.  Nothing newer is
+        // there to keep, so let extraction replace it.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        other => other?,
+    };
     let file_mtime = meta
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)
